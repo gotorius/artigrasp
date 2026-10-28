@@ -61,6 +61,25 @@ python tools/ood_eval.py run --output results/ood8_seed1 --device cuda
 
 複数行のコマンドは行末の`\`を含めて入力してください。1行にまとめても実行できます。GPUは方策推論に使い、起動ログの実際のactor parameter deviceが`cuda:0`等であることを確認します。RaiSimの物理計算はCPUです。
 
+### GPU使用と所要時間の確認
+
+`Policy inference device (verified parameters): cuda:0 (NVIDIA RTX A5500)`なら、モデルはGPUへ配置されています。実際の初回推論でも`Policy forward (verified tensors)`に入力・出力のデバイスとworker PIDを表示し、CUDAテンソルの使用メモリを表示します。CPUのNumPyへ戻した操作をRaiSimへ渡すため、GPU推論とCPU物理計算を各ステップで交互に行います。
+
+GPU側のネットワークは128ユニット×2層と小さく、2環境など少数のバッチではGPU使用率が低くなります。`nvidia-smi`の利用率はサンプリング期間内にGPUカーネルが実行された時間の割合なので、0%だけではCPU推論と判断できません（[NVIDIAの説明](https://docs.nvidia.com/deploy/nvidia-smi/index.html#utilization)）。
+
+データ読み込み、環境初期化、モデル読み込み、ロールアウト、集計・保存の所要時間を表示します。ロールアウトはさらにCPU物理計算＋状態取得、方策推論＋CPU/GPU転送、その他に分けます。方策の時間は転送や待ち時間を含む実時間であり、GPUカーネルだけの時間ではありません。記録は`performance/<バッチ先頭のepisode_id>.json`に保存します。
+
+物理計算のスレッド設定を後から壊さないよう、PyTorchのCPUスレッド数も`--num-threads`と揃えます。以前の`torch.set_num_threads(1)`はOpenMPを共有する構成で物理計算まで1スレッドへ変更する可能性があり、修正しています（[PyTorch 2.4.1の実装](https://github.com/pytorch/pytorch/blob/v2.4.1/aten/src/ATen/ParallelOpenMP.cpp#L42)）。ログのRaiSimスレッド数は要求設定であり、実際に動作したCPUスレッド数の測定値ではありません。
+
+時間を切り分けるには、まず**1条件だけ**を実行します。
+
+```bash
+python tools/ood_eval.py run --objects box --profiles normal --samples 2 \
+  --num-threads 2 --device cuda --output results/ood8_timing_cuda
+```
+
+2物体×全8条件のsmoke実験では16回の環境・モデル初期化が発生します。少数例のsmokeにかかった総時間を、そのまま100例の本番へ比例換算しないでください。`--batch-size`だけを増やしても`--samples 2`なら同時実行は2例のままです。本番の同時実行数は最大100例で、CPUの並列度は`--num-threads`から調整できます。速度の改善幅はUbuntuでの計測結果を確認してください。
+
 先に目標計画だけ確認する場合です。計画生成にはRaiSimやGPUは不要です。
 
 ```bash

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .io import append_row, file_sha256, read_json, read_rows
+from .io import append_row, file_sha256, read_json, read_rows, write_json
 from .paths import configure_package_path
 
 
@@ -111,6 +111,26 @@ def policy_parameter_device(models, requested):
     return actual
 
 
+def policy_tensor_devices(tensors, expected):
+    """Verify actual forward inputs/outputs before converting actions to NumPy."""
+    if any(tensor.device != expected for tensor in tensors.values()):
+        raise RuntimeError("Policy forward device mismatch: expected {}, got {}".format(
+            expected, {name: str(tensor.device) for name, tensor in tensors.items()}))
+    return {name: str(tensor.device) for name, tensor in tensors.items()}
+
+
+@contextlib.contextmanager
+def _timed_stage(name, performance):
+    print("  Starting {}".format(name), flush=True)
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        performance["stage_seconds"][name] = elapsed
+        print("  {}: {:.2f} s".format(name, elapsed), flush=True)
+
+
 class Policies:
     """Deterministic actors only; critic/optimizer/scaling are unused by released eval."""
 
@@ -127,7 +147,10 @@ class Policies:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        torch.set_num_threads(1)
+        # Torch's OpenMP backend calls omp_set_num_threads here. Setting this to
+        # 1 after RaiSim initialization can also serialize its parallel loops
+        # when the libraries share an OpenMP runtime. Keep their settings aligned.
+        torch.set_num_threads(int(config["environment"]["num_threads"]))
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
             torch.backends.cudnn.benchmark = False
@@ -149,17 +172,30 @@ class Policies:
         if self.device.type == "cuda":
             description += " ({})".format(torch.cuda.get_device_name(self.device))
         print("Policy inference device (verified parameters): {}".format(description), flush=True)
-        print("RaiSim physics device: CPU | environments: {} | threads: {}".format(
+        print("RaiSim physics device: CPU | environments: {} | requested threads: {}".format(
             env.num_envs, config["environment"]["num_threads"]), flush=True)
+        print("PyTorch CPU threads: {} (aligned with requested physics threads)".format(
+            torch.get_num_threads()), flush=True)
         self.articulation = False
+        self.forward_devices = None
 
     def actions(self, obs_r, obs_l):
         with self.torch.no_grad():
             right_name = "articulation_right" if self.articulation else "cooperative_right"
-            right = self.models[right_name].architecture(
-                self.torch.from_numpy(_float(obs_r)).to(self.device)).cpu().numpy()
-            left = self.models["cooperative_left"].architecture(
-                self.torch.from_numpy(_float(obs_l)).to(self.device)).cpu().numpy()
+            input_r = self.torch.from_numpy(_float(obs_r)).to(self.device)
+            output_r = self.models[right_name].architecture(input_r)
+            right = output_r.cpu().numpy()
+            input_l = self.torch.from_numpy(_float(obs_l)).to(self.device)
+            output_l = self.models["cooperative_left"].architecture(input_l)
+            left = output_l.cpu().numpy()
+        if self.forward_devices is None:
+            self.forward_devices = policy_tensor_devices(
+                dict(input_r=input_r, input_l=input_l, output_r=output_r, output_l=output_l), self.device)
+            print("Policy forward (verified tensors): {} | worker PID: {}".format(
+                self.forward_devices, os.getpid()), flush=True)
+            if self.device.type == "cuda":
+                print("CUDA tensor memory allocated: {:.2f} MiB".format(
+                    self.torch.cuda.memory_allocated(self.device) / (1024 ** 2)), flush=True)
         return _float(right), _float(left)
 
 
@@ -297,7 +333,7 @@ class Controller:
                     lift_target_quaternion_wxyz=self.lift_goal[index, 3:7].tolist())
 
 
-def simulate(env, controller, policy=None, replay_actions=None, realtime=False):
+def simulate(env, controller, policy=None, replay_actions=None, realtime=False, timings=None):
     count = controller.count
     steps = total_steps(controller.timing)
     states = np.empty((steps + 1, count, 138), dtype=np.float32)
@@ -305,6 +341,8 @@ def simulate(env, controller, policy=None, replay_actions=None, realtime=False):
     actions_l = np.empty_like(actions_r)
     invalid = np.zeros(count, dtype=bool)
     first_invalid = np.full(count, -1, dtype=np.int32)
+    wall_start = time.perf_counter()
+    policy_seconds = physics_seconds = 0.0
     controller.reset()
     states[0] = env.get_global_state()
     start = time.monotonic()
@@ -317,7 +355,13 @@ def simulate(env, controller, policy=None, replay_actions=None, realtime=False):
             invalid |= bad_observation
             obs_r = np.nan_to_num(obs_r, nan=0.0, posinf=0.0, neginf=0.0)
             obs_l = np.nan_to_num(obs_l, nan=0.0, posinf=0.0, neginf=0.0)
+            policy_start = time.perf_counter() if timings is not None else 0.0
             right, left = policy.actions(obs_r, obs_l)
+            if timings is not None:
+                # actions() returns CPU NumPy arrays: CUDA transfers have already
+                # synchronized. This is wall time including transfers, not GPU
+                # kernel time or GPU utilization.
+                policy_seconds += time.perf_counter() - policy_start
         else:
             right, left = replay_actions[0][step], replay_actions[1][step]
         bad_action = ~np.isfinite(right).all(axis=1) | ~np.isfinite(left).all(axis=1)
@@ -325,8 +369,11 @@ def simulate(env, controller, policy=None, replay_actions=None, realtime=False):
         right = _float(np.nan_to_num(right, nan=0.0, posinf=0.0, neginf=0.0))
         left = _float(np.nan_to_num(left, nan=0.0, posinf=0.0, neginf=0.0))
         actions_r[step], actions_l[step] = right, left
+        physics_start = time.perf_counter() if timings is not None else 0.0
         _, _, done = env.step(right, left)
         states[step + 1] = env.get_global_state()
+        if timings is not None:
+            physics_seconds += time.perf_counter() - physics_start
         # VecEnv silently resets numerical failures. Never score a reset as a success.
         invalid |= np.asarray(done, dtype=bool) | ~np.isfinite(states[step + 1]).all(axis=1)
         first_invalid[(first_invalid < 0) & invalid] = step
@@ -335,7 +382,14 @@ def simulate(env, controller, policy=None, replay_actions=None, realtime=False):
             if remaining > 0:
                 time.sleep(remaining)
         if step and step % 500 == 0 and not realtime:
-            print("  {}/{} steps".format(step, steps), flush=True)
+            print("  {}/{} steps | {:.1f} s elapsed".format(
+                step, steps, time.monotonic() - start), flush=True)
+    if timings is not None:
+        elapsed = time.perf_counter() - wall_start
+        timings.update(wall_s=elapsed, policy_and_transfer_s=policy_seconds,
+                       physics_and_state_s=physics_seconds,
+                       other_s=max(0.0, elapsed - policy_seconds - physics_seconds),
+                       vector_steps=steps, environments=count)
     return states, actions_r, actions_l, invalid, first_invalid
 
 
@@ -381,18 +435,33 @@ def run_worker(repo_root, results_dir, episode_ids, device=None, threads=None):
     if not specs or len({(s["object"], s["profile"]) for s in specs}) != 1:
         raise ValueError("Worker requires one nonempty object/profile batch")
     settings = plan["config"].get("runtime", {})
-    data = prepare_data(repo_root, specs)
-    config = load_environment_config(repo_root, len(specs), False,
-                                    threads or settings.get("num_threads", 4))
+    physics_threads = threads or settings.get("num_threads", 4)
+    requested_device = device or settings.get("device", "cpu")
+    performance = dict(worker_pid=os.getpid(), episode_ids=episode_ids,
+                       requested_policy_device=requested_device, requested_physics_threads=physics_threads,
+                       stage_seconds={}, rollout={})
+    with _timed_stage("reference_data", performance):
+        data = prepare_data(repo_root, specs)
+    config = load_environment_config(repo_root, len(specs), False, physics_threads)
     timing = timing_for(specs[0]["object"])
-    env = make_environment(repo_root, data, config, specs[0]["object"])
+    with _timed_stage("environment_setup", performance):
+        env = make_environment(repo_root, data, config, specs[0]["object"])
     try:
         env.seed(int(plan["config"].get("seed", 1)))
-        policy = Policies(repo_root, plan["config"]["checkpoints"], config, env,
-                          device or settings.get("device", "cpu"), plan["config"].get("seed", 1))
+        with _timed_stage("policy_setup", performance):
+            policy = Policies(repo_root, plan["config"]["checkpoints"], config, env,
+                              requested_device, plan["config"].get("seed", 1))
         controller = Controller(env, data, specs, timing, policy)
         # Kept in the batch artifact for exact replay if environment YAML later changes.
-        states, right, left, invalid, first_invalid = simulate(env, controller, policy)
+        with _timed_stage("rollout", performance):
+            states, right, left, invalid, first_invalid = simulate(
+                env, controller, policy, timings=performance["rollout"])
+        performance.update(policy_device=str(policy.device), policy_forward_devices=policy.forward_devices,
+                           torch_cpu_threads=policy.torch.get_num_threads())
+        print("  Rollout breakdown: CPU physics + state {:.2f} s | policy + transfers {:.2f} s | other {:.2f} s".format(
+            performance["rollout"]["physics_and_state_s"], performance["rollout"]["policy_and_transfer_s"],
+            performance["rollout"]["other_s"]), flush=True)
+        scoring_start = time.perf_counter()
         for i, spec in enumerate(specs):
             metric_spec = controller.metric_spec(i)
             row = dict(spec)
@@ -432,6 +501,11 @@ def run_worker(repo_root, results_dir, episode_ids, device=None, threads=None):
             print("{} paper={} public={} valid={}".format(
                 spec["episode_id"], row["paper_success"], row["public_success"],
                 row.get("valid", True)), flush=True)
+        performance["stage_seconds"]["scoring_and_save"] = time.perf_counter() - scoring_start
+        performance_path = results_dir / "performance" / (specs[0]["episode_id"] + ".json")
+        write_json(performance_path, performance)
+        print("  scoring_and_save: {:.2f} s | timings: {}".format(
+            performance["stage_seconds"]["scoring_and_save"], performance_path), flush=True)
     finally:
         env.close()
 

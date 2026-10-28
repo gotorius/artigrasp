@@ -239,6 +239,36 @@ class SimulationTests(unittest.TestCase):
         np.testing.assert_array_equal(invalid, [False])
         np.testing.assert_array_equal(first, [-1])
 
+    def test_profiling_separates_wall_time_and_preserves_the_trajectory(self):
+        clock = [0.0]
+
+        class TimedEnvironment(FakeSimulationEnvironment):
+            def get_global_state(self):
+                clock[0] += 1.0
+                return super().get_global_state()
+
+            def step(self, right, left):
+                clock[0] += 3.0
+                return super().step(right, left)
+
+        class TimedPolicy(FakeSimulationPolicy):
+            def actions(self, right, left):
+                clock[0] += 2.0
+                return super().actions(right, left)
+
+        env = TimedEnvironment(failures=False)
+        timings = {}
+        with patch("ood_suite.runtime.time.perf_counter", side_effect=lambda: clock[0]):
+            measured = simulate(env, self.controller(env), TimedPolicy(failures=False), timings=timings)
+        self.assertEqual(timings["policy_and_transfer_s"], 8.0)
+        self.assertEqual(timings["physics_and_state_s"], 16.0)
+        self.assertEqual(timings["wall_s"], 25.0)
+        self.assertEqual(timings["other_s"], 1.0)
+        env = FakeSimulationEnvironment(failures=False)
+        original = simulate(env, self.controller(env), FakeSimulationPolicy(failures=False))
+        for before, after in zip(original, measured):
+            np.testing.assert_array_equal(before, after)
+
 
 if __name__ == "__main__":
     unittest.main()
