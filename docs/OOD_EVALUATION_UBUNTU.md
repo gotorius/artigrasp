@@ -1,10 +1,21 @@
 # UbuntuでのOOD目標状態評価
 
-論文と同じArtiGrasp・RaiSim・PyTorch環境が動いているUbuntu向けの追加実験です。ライセンス取得や環境の再構築は不要です。既存の学習済みモデルを使い、再学習しません。C++環境・URDF・既存の評価スクリプトは変更していないため、今回の追加による再ビルドも不要です。
+論文と同じArtiGrasp・RaiSim・PyTorch環境が動いているUbuntu向けの追加実験です。ライセンス取得や環境の再構築は不要です。既存の学習済みモデルを使い、再学習しません。既にビルド済みの作業フォルダを`git pull`で更新する場合、今回の追加によるC++の再ビルドは不要です。
 
 リポジトリのルートで、普段ArtiGraspを動かしているPython環境を有効にして実行してください。追加のPythonパッケージは必要ありません。動画検証には、既存のffmpegに含まれる`ffprobe`を使用します。
 
 ## まず実行するコマンド
+
+**別の場所に新しくcloneした場合**は、そのcloneでシミュレータのPython拡張を一度ビルド・登録してください。元の作業フォルダでビルドした`.so`はGit管理外なので、新しいcloneには含まれません。同じconda環境・既存のRaiSim・ライセンスをそのまま使えます。
+
+```bash
+# 新しくcloneした artigrasp/ のルートで、既存のartigrasp環境を有効にした状態
+cd raisimGymTorch
+python setup.py develop
+cd ..
+```
+
+既にこのcloneでビルド済みなら、上の手順は省略できます。
 
 ```bash
 # artigrasp/ のルート。既存の論文用Python環境を有効にする。
@@ -13,6 +24,8 @@ python tools/ood_eval.py check
 # 全10物体 × 5条件 × 各100サンプル = 5,000試行
 python tools/ood_eval.py run --output results/ood_seed1
 ```
+
+`check`は読み込んだパッケージの`raisimGymTorch_path`も表示します。正しい参照先は`…/artigrasp/raisimGymTorch/raisimGymTorch/__init__.py`です。`…/artigrasp/raisimGymTorch/__init__.py`という外側の同名ディレクトリを読む問題を避けるため、起動時に内側のパッケージの検索順位を先頭へ移します。`compose_eval`が未ビルドの場合は、上記のビルドコマンドをエラーと一緒に表示します。
 
 正常終了後の比較表は`results/ood_seed1/report.md`です。計算中も完了した試行を順次保存します。計算を中断した場合は、同じ出力先を指定して再開します。
 

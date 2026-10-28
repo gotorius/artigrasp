@@ -11,13 +11,13 @@ import os
 import platform
 import random
 import re
-import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
 from .io import append_row, file_sha256, read_json, read_rows
+from .paths import configure_package_path
 
 
 def timing_for(object_name):
@@ -36,11 +36,7 @@ def total_steps(timing):
 
 
 def _paths(repo_root):
-    # The repository's outer directory and Python package have the same name.
-    # Prepend the actual package parent, independent of the invocation directory.
-    package_parent = str(Path(repo_root) / "raisimGymTorch")
-    if package_parent not in sys.path:
-        sys.path.insert(0, package_parent)
+    return configure_package_path(repo_root)
 
 
 def _float(values):

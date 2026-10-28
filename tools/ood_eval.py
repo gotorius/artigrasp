@@ -17,6 +17,7 @@ import time
 
 from ood_suite.io import (code_fingerprint, file_sha256, read_json, read_rows,
                           write_json)
+from ood_suite.paths import configure_package_path, missing_extension_hint
 from ood_suite.targets import build_plan, load_config
 
 
@@ -73,11 +74,18 @@ def parser_for_cli():
 
 
 def check_runtime(config, videos=False, verbose=True):
-    package_parent = str(REPO_ROOT / "raisimGymTorch")
-    if package_parent not in sys.path:
-        sys.path.insert(0, package_parent)
     errors, versions = [], {}
+    package_ready = True
+    try:
+        configure_package_path(REPO_ROOT)
+        package = importlib.import_module("raisimGymTorch")
+        versions["raisimGymTorch_path"] = str(Path(package.__file__).resolve())
+    except Exception as error:
+        package_ready = False
+        errors.append("raisimGymTorch package: {}".format(error))
     for name in ("numpy", "torch", "ruamel.yaml", "raisimGymTorch.env.bin.compose_eval"):
+        if name.endswith("compose_eval") and not package_ready:
+            continue
         try:
             module = importlib.import_module(name)
             versions[name] = str(getattr(module, "__version__", "available"))
@@ -86,6 +94,10 @@ def check_runtime(config, videos=False, verbose=True):
                 versions["compose_eval_sha256"] = file_sha256(module.__file__)
         except Exception as error:
             errors.append("{}: {}".format(name, error))
+            if (name.endswith("compose_eval") and isinstance(error, ModuleNotFoundError)
+                    and error.name in ("raisimGymTorch.env", "raisimGymTorch.env.bin",
+                                       "raisimGymTorch.env.bin.compose_eval")):
+                errors.append(missing_extension_hint(REPO_ROOT))
     for name, filename in config.get("checkpoints", {}).items():
         if not (REPO_ROOT / filename).is_file():
             errors.append("Missing checkpoint {}: {}".format(name, filename))
