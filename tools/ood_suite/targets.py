@@ -118,6 +118,64 @@ def articulation_outside_randomized_training(angle):
     return bool(float(angle) < 0.5 - 1e-6 or float(angle) > 1.5 + 1e-6)
 
 
+def _paper_normal(target, sample_seed, definition):
+    """Use the paper's composed-goal angle and world-yaw ranges for all objects."""
+    if definition.get("source") != "paper_supplement_b4":
+        raise ValueError("normal_goal.source must be paper_supplement_b4")
+    angle_rng = random.Random(stable_seed(sample_seed, "paper_normal_articulation"))
+    yaw_rng = random.Random(stable_seed(sample_seed, "paper_normal_yaw"))
+    angle = _sample(angle_rng, definition.get("articulation_rad", [0.5, 0.6]), "normal articulation_rad")
+    yaw = _sample(yaw_rng, definition.get("yaw_rad", [-0.4, 0.4]), "normal yaw_rad")
+    target.update(articulation_rad=angle, articulation_rule="absolute", orientation_delta_rad=0.0,
+                  normal_goal_source="paper_supplement_b4",
+                  orientation_rotation={"axis": [0.0, 0.0, 1.0], "axis_name": "z", "angle_rad": yaw,
+                                        "frame": "world", "stage": "both",
+                                        "quaternion_wxyz": axis_angle_quaternion([0, 0, 1], yaw)})
+
+
+def _random_ood_articulation(sample_seed, definition, joint_bounds):
+    """Sample uniformly over the feasible union of declared OOD intervals.
+
+    Intersect intervals with joint limits before drawing. Never clamp a drawn
+    angle into the learned range or silently call an in-range target OOD.
+    """
+    if not isinstance(definition, dict) or joint_bounds is None:
+        raise ValueError("articulation_ood requires an interval definition and joint bounds")
+    unknown = set(definition) - {"intervals_rad", "joint_margin_rad"}
+    if unknown:
+        raise ValueError("Unknown articulation_ood option(s): {}".format(", ".join(sorted(unknown))))
+    margin = float(definition.get("joint_margin_rad", 0.05))
+    if not math.isfinite(margin) or margin < 0:
+        raise ValueError("joint_margin_rad must be finite and nonnegative")
+    intervals = definition.get("intervals_rad")
+    if not isinstance(intervals, list) or not intervals:
+        raise ValueError("articulation_ood.intervals_rad must be nonempty")
+    eligible = []
+    previous_high = None
+    for index, interval in enumerate(intervals):
+        low, high = _range(interval, "articulation_ood interval")
+        if low == high or not (high < 0.5 - 1e-6 or low > 1.5 + 1e-6):
+            raise ValueError("Every OOD interval must have positive width entirely outside [0.5,1.5] rad")
+        if previous_high is not None and low < previous_high:
+            raise ValueError("OOD intervals must be sorted and non-overlapping")
+        previous_high = high
+        feasible_low = max(low, joint_bounds[0] + margin)
+        feasible_high = min(high, joint_bounds[1] - margin)
+        if feasible_high > feasible_low:
+            eligible.append((index, feasible_low, feasible_high))
+    if not eligible:
+        raise ValueError("No feasible OOD articulation interval for joint limits {}".format(joint_bounds))
+    rng = random.Random(stable_seed(sample_seed, "ood_articulation_union"))
+    offset = rng.random() * sum(high - low for _, low, high in eligible)
+    for index, low, high in eligible:
+        if offset < high - low:
+            return low + offset, index, [[a, b] for _, a, b in eligible]
+        offset -= high - low
+    # Rounding at the total length can only affect the last interval endpoint.
+    index, low, high = eligible[-1]
+    return high, index, [[a, b] for _, a, b in eligible]
+
+
 def _rotation(sample_seed, definition, sample_index):
     if not isinstance(definition, dict):
         raise ValueError("orientation must define axis, angle_deg, frame and stage")
@@ -154,7 +212,7 @@ def _rotation(sample_seed, definition, sample_index):
             "frame": frame, "stage": stage, "quaternion_wxyz": axis_angle_quaternion(axis, angle)}
 
 
-def sample_target(object_name, sample_seed, profile, joint_bounds=None, sample_index=None):
+def sample_target(object_name, sample_seed, profile, joint_bounds=None, sample_index=None, normal_definition=None):
     """Sample a paired baseline, then alter only the requested target axes.
 
     The profile-independent random stream ensures, for example, that a height
@@ -164,14 +222,14 @@ def sample_target(object_name, sample_seed, profile, joint_bounds=None, sample_i
     allowed = {"lift_m", "translation_distance_m", "translation_direction",
                "translation_directions_deg", "orientation_delta_deg", "orientation",
                "articulation_deg", "articulation_limit_fraction", "family", "severity",
-               "compare_to", "description", "stress_test", "factors"}
+               "articulation_ood", "compare_to", "description", "stress_test", "factors", "factor_flags"}
     unknown = set(profile) - allowed
     if unknown:
         raise ValueError("Unknown target option(s): {}".format(", ".join(sorted(unknown))))
     if "orientation" in profile and "orientation_delta_deg" in profile:
         raise ValueError("Choose quaternion orientation or legacy orientation_delta_deg")
-    if "articulation_deg" in profile and "articulation_limit_fraction" in profile:
-        raise ValueError("Choose absolute articulation_deg or articulation_limit_fraction")
+    if sum(key in profile for key in ("articulation_deg", "articulation_limit_fraction", "articulation_ood")) > 1:
+        raise ValueError("Choose only one articulation target definition")
     direction_rule = profile.get("translation_direction", "random")
     if direction_rule not in ("random", "control"):
         raise ValueError("translation_direction must be random or control")
@@ -188,6 +246,8 @@ def sample_target(object_name, sample_seed, profile, joint_bounds=None, sample_i
         "articulation_rule": "absolute" if ketchup else "public_relative",
         "public_delta_rad": delta,
     }
+    if normal_definition is not None:
+        _paper_normal(target, sample_seed, normal_definition)
     changed_axes = []
     if "lift_m" in profile:
         rng_axis = random.Random(stable_seed(sample_seed, "ood_lift"))
@@ -246,6 +306,11 @@ def sample_target(object_name, sample_seed, profile, joint_bounds=None, sample_i
         target["articulation_rad"] = joint_bounds[0] + fraction * (joint_bounds[1] - joint_bounds[0])
         target["articulation_rule"] = "absolute"
         target["articulation_limit_fraction"] = fraction
+        changed_axes.append("articulation")
+    if "articulation_ood" in profile:
+        angle, band, intervals = _random_ood_articulation(sample_seed, profile["articulation_ood"], joint_bounds)
+        target.update(articulation_rad=angle, articulation_rule="absolute",
+                      articulation_ood_band_index=band, articulation_ood_support_rad=intervals)
         changed_axes.append("articulation")
     target["changed_axes"] = changed_axes
     return target
@@ -360,7 +425,8 @@ def build_plan(repo_root, config, objects=None, profiles=None, samples=None,
                 arti_index = label_rng.randrange(len(arti_labels))
             for profile_name in selected_profiles:
                 definition = configured_profiles[profile_name]
-                target = sample_target(object_name, sample_seed, definition, limits, sample_index)
+                target = sample_target(object_name, sample_seed, definition, limits, sample_index,
+                                       config.get("normal_goal"))
                 feasible = articulation_is_feasible(target["articulation_rad"], limits)
                 episode = {
                     "episode_id": "{}__{}__{:04d}".format(object_name, profile_name, sample_index),
@@ -381,8 +447,10 @@ def build_plan(repo_root, config, objects=None, profiles=None, samples=None,
                     "target_reachability_basis": "articulation limits only; spatial reachability not inferred",
                     "articulation_requires_reset_resolution": target["articulation_rule"] == "public_relative",
                 }
-                if config.get("evaluation_protocol") == "multiaxis_v1":
-                    episode.update({"evaluation_protocol": "multiaxis_v1", "require_lift_pose_success": True,
+                protocol = config.get("evaluation_protocol")
+                if protocol in ("multiaxis_v1", "factorial_v1"):
+                    episode.update({"evaluation_protocol": protocol,
+                                    "require_lift_pose_success": protocol == "multiaxis_v1",
                                     "family": definition.get("family", "unspecified"),
                                     "severity": definition.get("severity"),
                                     "compare_to": definition.get("compare_to", "id_control"),
@@ -390,6 +458,16 @@ def build_plan(repo_root, config, objects=None, profiles=None, samples=None,
                                     "articulation_randomized_target_ood": (
                                         articulation_outside_randomized_training(target["articulation_rad"])
                                         if target["articulation_rule"] == "absolute" else None)})
+                if protocol == "factorial_v1":
+                    flags = definition.get("factor_flags", {})
+                    if set(flags) != {"horizontal", "lift", "articulation"} or not all(
+                            isinstance(value, bool) for value in flags.values()):
+                        raise ValueError("factorial_v1 requires Boolean horizontal/lift/articulation factor_flags")
+                    expected_axes = {axis for factor, axis in (("horizontal", "translation"),
+                                     ("lift", "lift"), ("articulation", "articulation")) if flags[factor]}
+                    if set(target["changed_axes"]) != expected_axes:
+                        raise ValueError("factor_flags must agree with the actual target overrides")
+                    episode["factor_flags"] = copy.deepcopy(flags)
                 episodes.append(episode)
     effective_config = copy.deepcopy(config)
     effective_config.update({
@@ -415,8 +493,8 @@ def build_plan(repo_root, config, objects=None, profiles=None, samples=None,
         "sampling": "label pairs sampled with replacement; independent random targets; paired across profiles",
         "ood_reference": (
             "Spatial targets extrapolate from the public composed-evaluation target envelope. "
-            "The full training support is not published. Absolute 180-degree articulation "
-            "exceeds the general_two randomized training range [0.5, 1.5] radians. "
+            "The full training support is not published. Articulation OOD is relative to "
+            "the public randomized training target range [0.5, 1.5] radians. "
             "URDF limits remain unchanged and infeasible requests remain in the denominator."
         ),
     }

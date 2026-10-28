@@ -68,11 +68,11 @@ We provide some pre-trained models to view the output of our method. They are st
 
 ## Evaluation
 
-- For goal-distribution OOD experiments on all objects (100 samples per object
-  and condition), separate paper/public metrics, Markdown comparison tables and
-  selected success/failure MP4s, see [Ubuntu OOD evaluation](docs/OOD_EVALUATION_UBUNTU.md).
-- For controlled shifts in distance, direction, world/object orientation, lift,
-  articulation and combinations, see [Multi-axis OOD experiment design](docs/OOD_MULTIAXIS_DESIGN.md).
+- For the eight combinations of normal / horizontal OOD / lift OOD /
+  articulation OOD (100 samples per object and combination), randomized
+  out-of-range targets, separate paper/public metrics, Markdown comparison
+  tables and success/failure MP4s, see [Ubuntu OOD evaluation](docs/OOD_MULTIAXIS_DESIGN.md).
+  The [previous five-condition protocol](docs/OOD_EVALUATION_UBUNTU.md) remains available explicitly.
 
 - For grasping and articulation of free-base objects, run
 

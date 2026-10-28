@@ -1,186 +1,128 @@
-# 多軸OODの実験設計とUbuntuでの実行
+# Ubuntuでのnormal＋3種類のOOD：全8通りの評価
 
-位置・向き・関節角について、単独要因、強度、組合せを比較する実験です。元の論文用環境、学習済み方策、初期状態、制御時間を揃えて目標を変更します。各物体・各条件100例が既定です。設定は[`configs/ood_multiaxis.json`](../configs/ood_multiaxis.json)です。
+既存の論文用Ubuntu環境・ライセンス・学習済みモデルを使用し、再学習しません。設定は[`configs/ood_multiaxis.json`](../configs/ood_multiaxis.json)、プロトコル名は`factorial_v1`です。CLIの既定設定もこの8条件になっています。
 
-## 評価の範囲と比較の原則
+## 評価する8通り
 
-- 空間目標は、公開評価の目標分布からの外挿として扱います。公開学習の全目標支持集合は分からないため、あらゆる学習姿勢からの厳密な分布外であるとは断定しません。
-- 関節角については、公開学習コードのランダム目標範囲 `[0.5, 1.5] rad` の外かを個別に記録します。可動域内かも別に記録します。
-- 同じ物体・sample_indexでは初期ラベル対と乱数を揃えます。単独条件と組合せ条件でも、同じ因子の目標値を共有します。
-- 移動距離の条件では対照の方向を保持します。方向の条件では対照の移動距離を保持します。
-- 世界Z軸の水平回転を机上の姿勢条件にします。世界X/Y軸の大きな傾きと任意軸の3D回転は、持ち上げ中の目標として与えます。最終的には机上の対照姿勢へ戻して開閉します。
-- 空中姿勢には、同じ0.6 mの持ち上げ目標を使う`air_control`を対照にします。机上での大きな傾きが台へめり込むことによる失敗と、姿勢制御の不達を混同しにくい設計です。空中目標でも手の到達可能性までは保証しません。
-- 空中対照自体がほとんど成功しない場合、全失敗を向きだけの問題と断定しません。全100例の主表に加え、対照に成功した例での達成率とその分母も表示します。対照成功0例ならこの比率は未算出です。
-- 物体の可動域を超える180°などはストレス評価に分け、主な汎化評価と区別します。
+水平移動・持ち上げ・開閉の3因子をそれぞれnormal/OODに切り替える`2³ = 8`通りです。向きのOODや追加強度の条件は含めません。向きは全条件でnormalと同じです。
 
-## 基本セット：17条件
-
-`--suite core`で選択します。10物体×17条件×100例＝**17,000試行**です。
-
-| 条件 | 変更する要素 | 目標 | 対照 |
+| 条件名 | 水平移動OOD | 持ち上げOOD | 開閉OOD |
 | --- | --- | --- | --- |
-| `id_control` | 公開評価範囲の対照 | 元評価の位置・向き・角度範囲 | 自身 |
-| `height_medium` | 持ち上げ量 | 0.35〜0.45 m | id_control |
-| `height_large` | 持ち上げ量 | 0.60〜0.90 m | id_control |
-| `distance_medium` | 水平移動距離 | 0.20〜0.35 m、方向は対照と同一 | id_control |
-| `distance_large` | 水平移動距離 | 0.50〜0.80 m、方向は対照と同一 | id_control |
-| `direction_balanced` | 水平移動方向 | 世界XY平面の0/90/180/270°、各25例、距離は対照と同一 | id_control |
-| `yaw_medium` | 最終配置の水平回転 | 世界Z軸±60〜75° | id_control |
-| `yaw_large` | 最終配置の水平回転 | 世界Z軸±120〜150° | id_control |
-| `air_control` | 空中姿勢の専用対照 | 持ち上げ量0.60 m、向きは対照と同じ | id_control |
-| `air_roll_large` | 持ち上げ中の傾き | 世界X軸±90〜120°、高さ0.60 m | air_control |
-| `air_pitch_large` | 持ち上げ中の傾き | 世界Y軸±90〜120°、高さ0.60 m | air_control |
-| `air_so3_large` | 持ち上げ中の任意軸回転 | 球面一様な軸、±90〜150°、高さ0.60 m | air_control |
-| `angle_small` | 小さい関節目標 | 絶対角15〜23°（約0.26〜0.40 rad） | id_control |
-| `angle_upper` | 可動域内の大きい関節目標 | 物体の可動域の85〜98% | id_control |
-| `combo_distance_yaw` | 距離×水平回転 | distance_mediumとyaw_mediumの組合せ | id_control |
-| `combo_planar` | 高さ・距離・水平回転・関節角 | height_medium＋distance_medium＋yaw_medium＋angle_upper | id_control |
-| `combo_spatial` | 距離・空中3D姿勢・関節角 | distance_medium＋air_so3_large＋angle_upper | air_control |
+| `normal` | OFF | OFF | OFF |
+| `ood_horizontal` | ON | OFF | OFF |
+| `ood_lift` | OFF | ON | OFF |
+| `ood_articulation` | OFF | OFF | ON |
+| `ood_horizontal_lift` | ON | ON | OFF |
+| `ood_horizontal_articulation` | ON | OFF | ON |
+| `ood_lift_articulation` | OFF | ON | ON |
+| `ood_all` | ON | ON | ON |
 
-回転角は、同じサンプルの対照目標姿勢からの増分です。`±`は各物体100例なら正負50例ずつです。方向や回転軸・符号は条件間で共有し、強度を変えても同じ方向へ動かします。
+10物体 × 8通り × 各100サンプル = **8,000試行**です。論文対象8物体（box、laptop、notebook、waffleiron、mixer、ketchup、espressomachine、microwave）と追加2物体（capsulemachine、phone）は結果を分けて集約します。`--suite all`と従来の`--suite core`は、どちらもこの8通りを選びます。
 
-`angle_upper`は全物体で可動域内ですが、関節目標が必ず学習のランダム範囲外になるわけではありません。上限1.5 radのespressomachineでは範囲内です。この物体も100例実行して主表に残し、関節OODだけの条件付き集計では適用対象外と分かるように表示します。
+## normalとランダムなOODの範囲
 
-`angle_small`は、多くの物体で初期の閉角に近い目標です。必ず開状態から閉じる動作を検証する条件ではありません。初期角が既に論文の0.5 rad閾値内かを記録し、後述の0.1 radの指標も併記します。
+normalの最終目標は、[論文Supplement B.4](https://arxiv.org/html/2309.03891v2#A2.SS4)に記載された範囲に合わせます。目標は初期物体姿勢を基準に生成します。
 
-## 詳細セットとストレスセット
+| 要素 | normal | OODがONのとき |
+| --- | --- | --- |
+| 最終水平移動 | x,yをそれぞれ一様に−0.10〜−0.05 m | 水平距離を一様に0.30〜0.80 m。方向は対応するnormalと同じ |
+| 移送途中の持ち上げ | 公開制御の0.15 m、ketchupは0.30 m | 上昇量を一様に0.60〜0.90 m |
+| 最終開閉角 | 全物体で絶対角0.50〜0.60 radを一様抽出 | 下記の可動域内・学習ランダム目標範囲外の区間から一様抽出 |
+| ベースの向き | 初期姿勢への世界Z軸yawノイズを一様に−0.40〜0.40 rad | normalと同一 |
+| 最終位置のz | 初期の机上高さから変化なし | normalと同一 |
 
-| セット | 内容 | 条件数 | 10物体・100例での試行数 |
-| --- | --- | ---: | ---: |
-| `core` | 上の基本条件 | 17 | 17,000 |
-| `full` | core＋弱いyaw、空中X/Y/任意軸の中程度回転、4方向の個別条件、可動域65〜80%の関節角 | 26 | 26,000 |
-| `stress` | id_control＋絶対関節角180°＋水平回転180°＋極端な複合条件 | 4 | 4,000 |
-| `all` | full＋3つのストレス条件 | 29 | 29,000 |
+水平移動はnormalの方向を保ち、距離だけを外挿します。0.30 m以上は論文の把持評価で使われるxy範囲（各±0.15 m）の最大水平距離約0.212 mも超えます。持ち上げは同評価の高さ上限0.45 mを超えます（[Supplement B.3](https://arxiv.org/html/2309.03891v2#A2.SS3)）。全学習データの空間目標支持集合は公開されていないため、空間OODはこれらの公表範囲に対する外挿です。
 
-fullではyawの30〜45/60〜75/120〜150°、空中のX/Y回転の45〜60/90〜120°、任意軸回転の45〜75/90〜150°を比較できます。
+開閉OODは公開学習コードのランダム目標範囲`[0.5, 1.5] rad`を基準に、候補区間`[0.20, 0.40] ∪ [1.60, 3.10] rad`を使います（約11〜23°、92〜178°）。各物体のURDF可動域から両端0.05 radを除いた範囲との共通部分を取り、**残った区間の合計長に比例して一様抽出**します。抽出後に値を丸める処理はありません。
 
-180°の正負は同じ終端姿勢になるため、ストレス条件の180°yawは符号を分けません。
+- espressomachineは上限1.5 radなので、下側の0.20〜0.40 radから抽出します。
+- ketchup・phoneは上限2.5 radなので、上側の候補は2.45 radまでです。
+- その他の上限がπ radの物体では、上側の候補はπ−0.05 radまでです。
+- 有効な区間がなくなる設定はエラーにします。分布内の角度を代わりに使いません。
 
-ストレス条件の180°関節角は要求どおり維持します。espressomachine、ketchup、phoneでは可動域を超えます。勝手に上限へ丸めず、成功率の分母と範囲外件数に残します。可動域は関節角だけの検査で、手・物体・台との完全な幾何学的到達可能性を保証するものではありません。
+毎試行で異なる乱数から値を選び、`--seed`で再現できます。同じ物体・sample_indexの8通りは参照ラベル・初期状態を共有し、各因子をONにしたときの値も共有します。例えば`ood_lift`と`ood_all`の持ち上げ量は同一です。抽出値、有効な角度区間、関節の可動域とOOD判定を`plan.json`へ保存し、実際に環境へ渡した目標を試行結果にも保存します。
 
-## 向きの表現と与えるタイミング
-
-向きはwxyz quaternionで保存し、軸角回転を合成します。Euler角の各成分を独立に一様抽出する方法は使いません。任意軸は球面上で一様、角度は指定区間で一様です。回転全体をHaar一様に抽出するという意味ではありません。
-
-```json
-"orientation": {
-  "axis": "random",
-  "angle_deg": [90, 150],
-  "frame": "world",
-  "stage": "lift",
-  "signed": true
-}
-```
-
-- `axis`: `x`、`y`、`z`、`random`。
-- `frame`: 世界座標での回転は`world`（左から合成）、対照目標の物体座標での回転は`object`（右から合成）。プリセットはworldです。
-- `stage`: `placement`は配置段階だけ、`lift`は持ち上げ段階だけ、`both`は両段階。指定しなかった段階の向きは対照と同じです。
-
-旧5条件のEuler第2成分による目標は、そのまま再現します。新しいquaternion回転を使う条件では、公開判定互換の姿勢参照にも生成した最終目標の第2Euler成分を使います。公開実装の「目標quaternionを読む」判定方法は保持し、実測姿勢を使う論文AEとは分けています。
-
-## 評価指標と結果表
-
-主指標は従来どおり、実測最終状態による**論文Suc.T**と、同じ軌跡への**公開実装の判定互換**です。[定義と実装差](OOD_EVALUATION_UBUNTU.md)は変更していません。新しい目標分布への評価なので、論文Table 3との比較は参考比較です。
-
-多軸版では次を追加します。
-
-| 指標 | 定義 |
-| --- | --- |
-| 空中姿勢達成率 | 持ち上げ区間の同一時刻で位置誤差 < 0.05 mかつSO(3)姿勢誤差 < 0.2 rad |
-| OOD目標達成率 | 論文Suc.T＋高さ目標達成＋空中姿勢達成。途中の回転失敗を最後の復帰成功で隠さない |
-| 厳密目標達成率 | 上の関節角誤差閾値だけを0.5 radから0.1 radへ変更した補助指標 |
-| 開閉開始時の許容内件数 | 開閉開始前から要求角との差が論文閾値0.5 rad以内だった件数 |
-| 関節OODの条件付き成功率 | 可動域内かつランダム学習目標[0.5,1.5] radの外にある計画試行だけで集計 |
-
-論文Suc.T自体に新しい閾値を混ぜません。関節角は有限可動域なので、角度差を2πで折り返しません。リセット時・開閉開始時・要求・最終の角度と開閉区間内の変化量、要求姿勢の初期からの角距離、持ち上げ終端の位置・姿勢誤差も保存します。
-
-`report.md` / `summary.json`には次を出します。
-
-- 各物体・各条件の成功数/100、Wilson 95%区間、論文/公開判定の無加工誤差と公開表示のクリップ値。
-- 因子・強度別の成功率、同じ高さの空中対照との対応比較。
-- 最終位置・最終姿勢・最終関節角・空中姿勢の各達成率。各列は独立の条件で、排他的な失敗原因分類ではありません。
-- 移動4方向、回転正負の内訳。全物体の集約と物体別主表を併記。
-- 可動域外件数、関節OOD対象数、初期関節角が既に許容内だった数。
-- 距離×yawの4条件の対応比較。交互作用は `100×平均(S距離yaw − S距離 − Syaw ＋ S対照)` のppで報告します。検定結果とは区別した記述統計です。
-- 論文8物体と追加2物体を分けた集約と論文Table 3の公開値。
-
-全計画試行を主表の分母にし、数値異常は失敗、未完了は明示します。未完了の表は暫定下限で、全件が終わるまで信頼区間は出しません。誤差を測れない試行は0で埋めず測定数を示します。
+normalは**論文の目標分布に合わせた対照条件**です。公開制御の段階・時間・途中の持ち上げ量を使い、参照ペアを100例抽出するため、論文の全評価手順やTable 3の数値を完全再現する設定とは区別します。従来版の初期角に応じた相対開閉目標やEuler Y回転は、この8条件のnormalには使いません。
 
 ## Ubuntuで実行
 
-既存の論文用conda環境とライセンスを使います。新しいcheckoutの場合だけ、先にそのcheckoutで`cd raisimGymTorch; python setup.py develop; cd ..`を実行します。C++環境やURDFは今回変更していません。
-
-まず少数で全段階を確認します。少数試行から定量的な結論は出しません。
+既存のartigrasp環境を有効にし、リポジトリのルートで実行します。新しくclone/worktreeを作った場合だけ、そのcheckoutで`cd raisimGymTorch`、`python setup.py develop`、`cd ..`を一度実行します。既存checkoutのC++再ビルドは不要です。
 
 ```bash
-python tools/ood_eval.py run --config configs/ood_multiaxis.json --suite core \
-  --samples 2 --output results/multiaxis_smoke --device cuda
+python tools/ood_eval.py check
+
+# まず全8通りを少数で確認（2物体 × 8通り × 2例 = 32試行）
+python tools/ood_eval.py run --objects box ketchup --samples 2 \
+  --output results/ood8_smoke --device cuda
+
+# 本番：10物体 × 8通り × 100例
+python tools/ood_eval.py run --output results/ood8_seed1 --device cuda
 ```
 
-本番の計画を確認してから実行する場合です。計画生成にはRaiSim・GPUは不要です。
+複数行のコマンドは行末の`\`を含めて入力してください。1行にまとめても実行できます。GPUは方策推論に使い、起動ログの実際のactor parameter deviceが`cuda:0`等であることを確認します。RaiSimの物理計算はCPUです。
+
+先に目標計画だけ確認する場合です。計画生成にはRaiSimやGPUは不要です。
 
 ```bash
-python tools/ood_eval.py plan --config configs/ood_multiaxis.json --suite core \
-  --output results/multiaxis_core_seed1
-python tools/ood_eval.py run --output results/multiaxis_core_seed1 --resume --device cuda
+python tools/ood_eval.py plan --output results/ood8_seed1
+python tools/ood_eval.py run --output results/ood8_seed1 --resume --device cuda
 ```
 
-直接開始することもできます。
+中断からの再開も、同じ出力先の保存済み計画を使用します。
 
 ```bash
-python tools/ood_eval.py run --config configs/ood_multiaxis.json --suite core \
-  --output results/multiaxis_core_seed1 --device cuda
+python tools/ood_eval.py run --output results/ood8_seed1 --resume
 ```
 
-追加の強度・方向別条件まで評価する場合は`--suite full`、到達不能要求も含むストレス評価は`--suite stress`を使い、出力先を分けてください。`--samples`は各物体・各条件の例数です。GPUは方策推論に使い、RaiSim物理計算はCPUです。
+任意の条件だけを確認する場合は、例えば`--profiles normal ood_all`を指定できます。通常の本番では指定せず、全8通りを実行してください。新しい乱数での追加実験は`--seed 2 --output results/ood8_seed2`のように出力先も分けます。
 
-一部だけ実行する例です。比較に使う対照も含めてください。対照がなければレポートの対応比較は未完ペアとして表示されます。
+## 定量評価とMarkdownの結果表
+
+実行後は`results/ood8_seed1/report.md`と`summary.json`へ集計します。途中でも次のコマンドで集計し直せます。
 
 ```bash
-python tools/ood_eval.py run --config configs/ood_multiaxis.json \
-  --profiles id_control air_control air_roll_large air_pitch_large air_so3_large \
-  --output results/multiaxis_orientation_seed1 --device cuda
+python tools/ood_eval.py report --results results/ood8_seed1
 ```
 
-同じ実験の再開は保存済み計画を使用します。
+- **論文Suc.T**：最後のstep後に位置誤差 < 0.05 m、SO(3)姿勢誤差 < 0.2 rad、関節角誤差 < 0.5 radを同時に満たす成功率。
+- **公開実装互換**：元実装の時刻ごとの成功保持、1ステップ前の測定、姿勢の添字、終了時guardを含む判定式を同じ軌跡へ適用した成功率。
+- **OOD目標達成**：論文Suc.Tに加え、持ち上げ区間に目標上昇量との絶対誤差 < 0.05 mを達成した割合。最終位置が机上なので、高さOODの評価に使います。
+- **厳密目標達成**：OOD目標達成の関節角閾値を0.1 radへ狭めた補助指標。小角度目標で既に論文閾値内だった件数も併記します。
+
+各物体・各条件の成功数/100、Wilson 95%区間、無加工誤差、公開表示のクリップ値、normalとの対応比較を表にします。8通りが揃った初期状態の組から、他因子について平均した各OODのON−OFF差と、2因子・3因子の差の差もppで出します。これらは記述統計で、有意差検定は行いません。
+
+論文8物体と全10物体の集約を分け、[Table 3](https://arxiv.org/html/2309.03891v2#S6.T3)の公表値を併記します。論文は約7,500試行の集約で、本実験とはサンプル数・重み・目標条件が異なります。全計画試行を主表の分母にし、実行異常は失敗、未完了は暫定下限として明示します。
+
+ketchupでは要求した開閉角を方策の観測にも渡す既存の補正をnormal/OOD両方に適用します。`controller_changes`とレポートに記録します。公開実装互換は判定式の互換性であり、元スクリプトと同一軌跡という意味ではありません。
+
+## 成功・失敗例のMP4
+
+UbuntuのGUIセッションで既存のRaiSimUnityを起動し、Auto-connectを有効にします。その後、定量評価した操作列を再生して録画します。
 
 ```bash
-python tools/ood_eval.py run --output results/multiaxis_core_seed1 --resume
+python tools/ood_record.py --results results/ood8_seed1 --per-outcome 5
+python tools/ood_eval.py report --results results/ood8_seed1
 ```
 
-## 定性的評価
+既定では`ood_goal_success`に従い、各物体・各条件から成功5例・失敗5例までを選びます。最大800本です。成功0例の場合は成功動画の不足を記録します。元の状態軌跡と判定が一致する実MP4だけを採用します。動画の一覧は`videos/ood_goal_success/index.md`に保存します。
 
-既存のRaiSimUnityを起動してAuto-connectを有効にし、数値評価後に次を実行します。
+論文指標で選別したい場合は`--metric paper_success`、一部だけ録画する場合は`--profiles normal ood_all`を追加できます。録画の詳細やキャプチャ場所の指定は[録画の手順](OOD_EVALUATION_UBUNTU.md#成功失敗例をmp4にする)を参照してください。
 
-```bash
-python tools/ood_record.py --results results/multiaxis_core_seed1 --per-outcome 5
-python tools/ood_eval.py report --results results/multiaxis_core_seed1
-```
+## 旧実験との併用
 
-多軸設定の`video_metric`は`ood_goal_success`なので、途中の空中姿勢も含めた成功・失敗を各物体・各条件で最大5件ずつ選びます。元の評価済み操作列を再生し、全軌跡と判定が一致した実MP4だけを採用します。成功0件の条件は成功動画0件として不足を明記します。core全条件では最大1,700本になるので、必要な条件だけ`--profiles`で絞ることもできます。
+既に実行中の実験は動画収集まで同じ版で完了してください。評価コードと入力のハッシュを検証するため、**実行中のcheckoutでgit pullすると、その実験の再開・録画で版の不一致になります**。新しい8条件は別の出力先を使います。
 
-論文指標や厳密目標指標による選別もできます。索引は指標ごとに分かれます。
-
-```bash
-python tools/ood_record.py --results results/multiaxis_core_seed1 \
-  --profiles air_so3_large combo_spatial --metric paper_success
-python tools/ood_record.py --results results/multiaxis_core_seed1 \
-  --profiles air_so3_large combo_spatial --metric strict_goal_success
-```
-
-## 実行中の従来実験を続ける場合
-
-既存の`configs/ood_eval.json`の5条件、seedから作る目標値、論文・公開判定は維持しています。ただし評価コードのハッシュは更新されるため、**現在走っている実験のフォルダではgit pullせず、動画収集までその版のまま完了・再開**してください。
-
-先に多軸版を準備するなら、別のcheckoutを作れます。次はGitの履歴を共有するworktreeを使う例です。元のフォルダのコードは変更しません。
+先に新しい版を準備するなら、別のworktreeを作れます。
 
 ```bash
 cd ~/goto/artigrasp
 git fetch origin
-git worktree add --detach ../artigrasp-multiaxis origin/main
-cd ../artigrasp-multiaxis/raisimGymTorch
+git worktree add --detach ../artigrasp-ood8 origin/main
+cd ../artigrasp-ood8/raisimGymTorch
 python setup.py develop
 cd ..
 ```
 
-新しいcheckoutで多軸版の確認・計画生成を行い、本番は計算資源の空きに合わせて実行してください。既存結果へ新しい目標や異なる版の結果を追記する運用は避け、新しい出力先を使います。
+元のコードは変更しません。新しいcheckoutで環境をビルド・登録すると同じconda環境の参照先が変わるため、旧実験の再開・録画は元のcheckoutから行い、そのcheckoutの拡張が読み込まれることを`check`で確認してください。
+
+従来5条件は`--config configs/ood_eval.json`、以前の17条件等は`--config configs/archive/ood_multiaxis_legacy.json`で明示的に選べます。既定では実行されません。既存の結果に異なる版・異なる計画の試行を追加せず、保存済み計画と元の版で再開してください。

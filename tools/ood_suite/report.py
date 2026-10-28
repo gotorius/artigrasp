@@ -2,6 +2,7 @@
 
 import argparse
 import collections
+import itertools
 import json
 import math
 from pathlib import Path
@@ -208,6 +209,94 @@ def _interaction_summaries(planned, completed, definitions):
     return result
 
 
+FACTOR_NAMES = ("horizontal", "lift", "articulation")
+
+
+def _factorial_summaries(planned, completed, definitions):
+    """Matched 2^3 differences, averaged over the other factors and trials.
+
+    Each contrast uses complete octuples with identical reset references.
+    Invalid completed episodes are failures; missing measurements stay missing.
+    """
+    by_mask = collections.defaultdict(dict)
+    for item in planned:
+        flags = definitions[item["profile"]]["factor_flags"]
+        mask = tuple(flags[name] for name in FACTOR_NAMES)
+        key = (item["object"], item.get("sample_index", 0))
+        if key in by_mask[mask]:
+            raise ValueError("Duplicate factorial combination for {}".format(key))
+        by_mask[mask][key] = item
+    masks = list(itertools.product((False, True), repeat=3))
+    keys = set().union(*(set(items) for items in by_mask.values()))
+    metrics = ["paper_success", "public_success"] + [name for name in
+               ("ood_goal_success", "strict_goal_success") if any(name in row for row in completed.values())]
+    result = []
+    for metric in metrics:
+        octuples, missing = [], 0
+        for key in sorted(keys):
+            items = [by_mask[mask].get(key) for mask in masks]
+            if any(item is None or item["episode_id"] not in completed for item in items):
+                missing += 1
+                continue
+            if any(any(item.get(field) != items[0].get(field) for field in
+                       ("grasp_label", "arti_label", "seed")) for item in items[1:]):
+                raise ValueError("Factorial comparisons require matching initial references")
+            rows = [completed[item["episode_id"]] for item in items]
+            if any(row.get("valid", True) and not isinstance(row.get(metric), bool) for row in rows):
+                missing += 1
+                continue
+            octuples.append([int(_is_success(row, metric)) for row in rows])
+        for order in range(1, 4):
+            for factors in itertools.combinations(range(3), order):
+                values = [sum((-1) ** (order - sum(mask[i] for i in factors)) * value
+                              for mask, value in zip(masks, outcomes)) / (2 ** (3 - order))
+                          for outcomes in octuples]
+                result.append(dict(factors=[FACTOR_NAMES[i] for i in factors], order=order, metric=metric,
+                                   complete_octuples=len(values), missing_octuples=missing,
+                                   difference_pp=100 * sum(values) / len(values) if values else None))
+    return result
+
+
+def _factorial_tables(plan, groups, aggregates, effects):
+    if plan.get("config", {}).get("evaluation_protocol") != "factorial_v1":
+        return []
+    definitions = plan["config"]["profiles"]
+    lines = ["", "## 3因子・8通りの組合せ", "",
+             "水平移動・持ち上げ・開閉の3因子をON/OFFします。OFFはnormalと同じ目標、ONは分布外の範囲から試行ごとにランダム抽出した目標です。同じ物体・sample_indexでは初期状態、通常の向き、各ON因子の抽出値を8通りで共有します。", "",
+             "| 条件 | 水平移動OOD | 持ち上げOOD | 開閉OOD | n | 論文Suc.T | 公開実装互換 | OOD目標達成 | 厳密目標達成 |",
+             "| --- | --- | --- | --- | ---: | --- | --- | --- | --- |"]
+    for group in aggregates:
+        if group["scope"] != "all_objects":
+            continue
+        flags = definitions[group["profile"]]["factor_flags"]
+        cells = ["ON" if flags[name] else "OFF" for name in FACTOR_NAMES]
+        successes = [_success_cell(group, metric) for metric in
+                     ("paper_success", "public_success", "ood_goal_success", "strict_goal_success")]
+        lines.append("| %s | %s | %d | %s |" % (group["profile"], " | ".join(cells),
+                                                     group["planned"], " | ".join(successes)))
+    lines.extend(["", "### 開閉OODの確認", "",
+                  "開閉角は学習時のランダム目標範囲[0.5,1.5] radの外側とURDF可動域の共通部分から一様抽出します。小角度目標は開閉開始時点で既に論文の許容誤差0.5 rad内の場合があるため、厳密指標（0.1 rad）と開始時の達成件数を併記します。", "",
+                  "| 条件 | 物体 | 関節範囲外 | 範囲内の関節OOD n | うち完了 | 条件付き論文Suc.T | 条件付き厳密目標達成 | 開閉開始時に論文閾値内/測定数 |",
+                  "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"])
+    for group in groups:
+        if not definitions[group["profile"]]["factor_flags"]["articulation"]:
+            continue
+        lines.append("| %s | %s | %d | %d | %d | %s | %s | %d/%d |" % (
+            group["profile"], group["object"], group["unreachable_targets"], group["joint_ood_planned"],
+            group["joint_ood_completed"], _fmt(group["joint_ood_paper_success_rate"]),
+            _fmt(group["joint_ood_strict_goal_success_rate"]),
+            group["articulation_start_within_paper_tolerance"], group["articulation_start_measured"]))
+    lines.extend(["", "### 因子の効果と組合せによる変化", "",
+                  "全物体の同じ初期状態8通りが完了した組だけを使う記述統計です。単因子は他の2因子について平均したON−OFF差、2因子は残る因子について平均した差の差、3因子は差の差の差です。100倍したppで示し、有意差検定とは区別します。未実行や指標未測定の組数も表示します。", "",
+                  "| 因子 | 次数 | 指標 | 完了8条件組 | 未完/未測定8条件組 | 差 (pp) |",
+                  "| --- | ---: | --- | ---: | ---: | ---: |"])
+    for effect in effects:
+        lines.append("| %s | %d | %s | %d | %d | %s |" % (
+            " × ".join(effect["factors"]), effect["order"], effect["metric"],
+            effect["complete_octuples"], effect["missing_octuples"], _fmt(effect["difference_pp"], 1)))
+    return lines
+
+
 def _stratified_summaries(planned, completed, profiles):
     summaries = []
     for profile in profiles:
@@ -350,11 +439,13 @@ def generate_report(results_dir):
                                                        if all(value is not None for value in values) else None)
                 aggregates.append(dict(profile=profile, scope=scope, **summary))
 
-    id_profile = next((name for name in ("id", "in_distribution", "id_control", "published") if name in profiles), None)
+    id_profile = next((name for name in ("normal", "id", "in_distribution", "id_control", "published") if name in profiles), None)
     comparisons = {name: definition["compare_to"] for name, definition in definitions.items()
                    if definition.get("compare_to")}
     paired = _paired_comparisons(planned, completed, profiles, id_profile, comparisons)
     interactions = _interaction_summaries(planned, completed, plan.get("config", {}).get("interactions", []))
+    factorial = (_factorial_summaries(planned, completed, definitions)
+                 if plan.get("config", {}).get("evaluation_protocol") == "factorial_v1" else [])
     strata = _stratified_summaries(planned, completed, profiles)
     controller_changes = sorted({change for row in rows for change in row.get("controller_changes", [])})
     summary = {
@@ -362,9 +453,13 @@ def generate_report(results_dir):
         "missing": len(planned) - len(completed), "objects": objects, "profiles": profiles,
         "groups": groups, "aggregates": aggregates, "paired_comparisons": paired,
         "interaction_comparisons": interactions, "stratified_summaries": strata,
+        "factorial_comparisons": factorial,
         "controller_changes": controller_changes,
         "baseline_source": baseline["source"], "published_baselines": baseline["dynamic_task_table3"],
     }
+    range_note = ("8条件版は関節の可動域内でのみ抽出します。空間目標の到達可能性は保証せず、失敗試行も分母に含めます。"
+                  if plan.get("config", {}).get("evaluation_protocol") == "factorial_v1" else
+                  "180°など関節範囲外の要求目標も勝手に丸めず評価します。範囲外件数を併記し、到達可能な目標への汎化とは区別してください。")
     lines = [
         "# ArtiGrasp OOD 目標状態の評価結果", "",
         "進捗: **%d / %d 試行完了**。" % (len(completed), len(planned)), "",
@@ -376,15 +471,24 @@ def generate_report(results_dir):
     ]
     for name in profiles:
         configuration = plan.get("config", {}).get("profiles", {}).get(name, {})
-        angle_description = _profile_description(configuration, "articulation_deg", "公開設定（初期角度を参照）")
+        normal_goal = plan.get("config", {}).get("normal_goal", {})
+        default_angle = (json.dumps(normal_goal["articulation_rad"]) + " rad（絶対角）"
+                         if normal_goal else "公開設定（初期角度を参照）")
+        angle_description = _profile_description(configuration, "articulation_deg", default_angle)
         if "articulation_deg" in configuration:
             angle_description += " deg"
         elif "articulation_rad" in configuration:
             angle_description = _profile_description(configuration, "articulation_rad", "") + " rad"
         elif "articulation_limit_fraction" in configuration:
             angle_description = "可動域の " + json.dumps(configuration["articulation_limit_fraction"])
+        elif "articulation_ood" in configuration:
+            angle_definition = configuration["articulation_ood"]
+            angle_description = "%s rad ∩ 可動域内（端から%s rad除外）" % (
+                json.dumps(angle_definition["intervals_rad"]), angle_definition.get("joint_margin_rad", 0.05))
         direction = configuration.get("translation_directions_deg", configuration.get("translation_direction", "公開設定"))
-        orientation = configuration.get("orientation", configuration.get("orientation_delta_deg", "公開設定"))
+        default_orientation = ({"axis": "world z", "yaw_rad": normal_goal["yaw_rad"]}
+                               if normal_goal else "公開設定")
+        orientation = configuration.get("orientation", configuration.get("orientation_delta_deg", default_orientation))
         lines.append("| %s | %s / %s | %s | %s | %s / %s | %s | %s |" % (name,
             configuration.get("family", "legacy"), configuration.get("severity", "—"),
             configuration.get("compare_to", "id_control"),
@@ -395,17 +499,17 @@ def generate_report(results_dir):
         "## 指標の区別", "",
         "- **論文 Suc.T**: 最後の `env.step` 後の物理状態で PE < 0.05 m、SO(3)測地距離 AE < 0.2 rad、AAE < 0.5 rad を同時に満たす割合。誤差は無加工です。",
         "- **公開実装の判定互換**: `92fb307` の compose/ketchup の成功・誤差の計算式を同じロールアウトへ適用します。到達・姿勢・開閉を別々の時刻に達成しても成功を保持し、最後に公開コードのguardを適用します。元コードの1ステップ遅れと、物理姿勢の代わりに目標quaternionを読む添字も保持します。制御側の補正がある場合、元スクリプトと同一の軌跡を再現したという意味ではありません。",
-        "- **OOD目標達成**: 論文Suc.Tに加え、持ち上げ目標を満たす本実験の補助指標です。従来版は上昇量誤差 < 0.05 m、多軸版multiaxis_v1は空中目標の位置誤差 < 0.05 mかつ姿勢誤差 < 0.2 radを同じ時刻に達成することも要求します。最終状態だけでは途中の3D回転の達成を判定できません。",
+        "- **OOD目標達成**: 論文Suc.Tに加え、持ち上げ目標を満たす本実験の補助指標です。従来版と8条件版factorial_v1は上昇量誤差 < 0.05 m、旧多軸版multiaxis_v1は空中目標の位置誤差 < 0.05 mかつ姿勢誤差 < 0.2 radを同じ時刻に達成することも要求します。",
         "- **厳密目標達成**: OOD目標達成の関節角閾値を0.5 radから0.1 radへ狭めた補助指標です。論文Suc.Tは変更していません。小角度目標では初期角が既に論文閾値内にある場合も別に数えます。",
         "- 公開実装のPE/AEは移送終了付近、AAEは最後のステップの直前の状態です。公開実装の表示に合わせたクリップ値（PE 0.1 m、AE 0.3 rad、AAE 1.0 rad上限）を無加工値と分けます。",
         "- 誤差平均は正常かつ有限の測定値だけを使います。測定数は別表に表示します。異常試行を誤差0として埋めません。", "",
-        "180°など関節範囲外の要求目標も勝手に丸めず評価します。範囲外件数を併記し、到達可能な目標への汎化とは区別してください。", "",
+        range_note, "",
         "## 物体別の成功率", "",
         "| 条件 | 物体 | 完了/計画 | 異常 | 未実行 | 関節範囲外 | 論文 Suc.T (95% CI) | 公開実装互換 (95% CI) |",
         "| --- | --- | ---: | ---: | ---: | ---: | --- | --- |",
     ])
     if "ketchup_forward_requested_articulation" in controller_changes:
-        location = lines.index("180°など関節範囲外の要求目標も勝手に丸めず評価します。範囲外件数を併記し、到達可能な目標への汎化とは区別してください。")
+        location = lines.index(range_note)
         lines[location:location] = [
             "**ketchupの目標角度入力の補正**: 公開スクリプトは`set_obj_goal(angle)`で表示・位置用の目標を変えても、ポリシーの関節目標`final_obj_angle_`を更新せず0 radを維持します。本実験では開閉準備への遷移時に要求角度を`set_goals`にも渡します。元の段階・制御切替は保持しますが、要求目標を実際にポリシーへ渡すための補正により軌跡は公開スクリプトと異なり得ます。公開互換の数値は、この補正後の同じ軌跡に元の判定式を適用した結果です。", "",
         ]
@@ -415,6 +519,7 @@ def generate_report(results_dir):
             _success_cell(group, "paper_success"), _success_cell(group, "public_success")))
 
     lines.extend(_multiaxis_tables(plan, groups, aggregates, strata, interactions))
+    lines.extend(_factorial_tables(plan, groups, aggregates, factorial))
 
     lines.extend(["", "## 論文 Table 3 との比較", "",
         "[ArtiGrasp 論文・Table 3 / §6.1 / Supplement B.4](%s)。公開値は8物体・約7500試行の集約で、物体別のTable 3値は掲載されていません。物体・条件ごとに同数のサンプルを評価する本実験とは重みや目標分布が異なります。差は参考比較であり、再現誤差とは解釈しません。" % baseline["source"]["url"], "",

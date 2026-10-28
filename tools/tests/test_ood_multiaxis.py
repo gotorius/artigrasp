@@ -31,7 +31,7 @@ def label_set(name):
 
 class MultiaxisTargetTests(unittest.TestCase):
     def setUp(self):
-        self.config = load_config(ROOT / "configs/ood_multiaxis.json")
+        self.config = load_config(ROOT / "configs/archive/ood_multiaxis_legacy.json")
 
     def plan(self, objects=("box", "espressomachine"), samples=4, **kwargs):
         return build_plan(ROOT, self.config, objects=list(objects), samples=samples,
@@ -155,7 +155,7 @@ class RotationExecutionTests(unittest.TestCase):
             self.assertAlmostEqual(quaternion_geodesic_rad(reference, lift), 0 if stage == "placement" else math.pi)
 
     def test_controller_sends_distinct_lift_and_placement_quaternions(self):
-        config = load_config(ROOT / "configs/ood_multiaxis.json")
+        config = load_config(ROOT / "configs/archive/ood_multiaxis_legacy.json")
         plan = build_plan(ROOT, config, objects=["box"], profiles=["air_pitch_large"], samples=1,
                           label_sets={"box": label_set("box")})
         data, env = _data(), EventEnvironment()
@@ -232,7 +232,7 @@ class IntermediateMetricTests(unittest.TestCase):
 
 class MultiaxisReportTests(unittest.TestCase):
     def make_run(self, directory, profiles, samples=1):
-        config = load_config(ROOT / "configs/ood_multiaxis.json")
+        config = load_config(ROOT / "configs/archive/ood_multiaxis_legacy.json")
         plan = build_plan(ROOT, config, objects=["box"], profiles=profiles, samples=samples,
                           label_sets={"box": label_set("box")})
         (directory/"plan.json").write_text(json.dumps(plan))
@@ -273,7 +273,7 @@ class MultiaxisReportTests(unittest.TestCase):
     def test_joint_ood_denominator_excludes_in_range_targets_and_keeps_failures(self):
         with tempfile.TemporaryDirectory() as folder:
             directory = Path(folder)
-            config = load_config(ROOT / "configs/ood_multiaxis.json")
+            config = load_config(ROOT / "configs/archive/ood_multiaxis_legacy.json")
             plan = build_plan(ROOT,config,objects=["box","espressomachine"],profiles=["angle_upper"],samples=2,
                               label_sets={name:label_set(name) for name in ("box","espressomachine")})
             (directory/"plan.json").write_text(json.dumps(plan))

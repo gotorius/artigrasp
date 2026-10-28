@@ -1,6 +1,6 @@
-# UbuntuでのOOD目標状態評価
+# Ubuntuでの従来5条件のOOD目標状態評価
 
-向き・移動方向・関節角・複数因子を比較する多軸版は、[多軸OODの実験設計と実行手順](OOD_MULTIAXIS_DESIGN.md)を参照してください。以下の`configs/ood_eval.json`による従来5条件も引き続き利用できます。
+既定の実験はnormalと水平移動・持ち上げ・開閉OODの[全8通りの実験設計と実行手順](OOD_MULTIAXIS_DESIGN.md)です。このページは`--config configs/ood_eval.json`を明示して使う従来5条件の手順です。
 
 論文と同じArtiGrasp・RaiSim・PyTorch環境が動いているUbuntu向けの追加実験です。ライセンス取得や環境の再構築は不要です。既存の学習済みモデルを使い、再学習しません。既にビルド済みの作業フォルダを`git pull`で更新する場合、今回の追加によるC++の再ビルドは不要です。
 
@@ -24,7 +24,7 @@ cd ..
 python tools/ood_eval.py check
 
 # 全10物体 × 5条件 × 各100サンプル = 5,000試行
-python tools/ood_eval.py run --output results/ood_seed1
+python tools/ood_eval.py run --config configs/ood_eval.json --output results/ood_seed1
 ```
 
 `check`は読み込んだパッケージの`raisimGymTorch_path`も表示します。正しい参照先は`…/artigrasp/raisimGymTorch/raisimGymTorch/__init__.py`です。`…/artigrasp/raisimGymTorch/__init__.py`という外側の同名ディレクトリを読む問題を避けるため、起動時に内側のパッケージの検索順位を先頭へ移します。`compose_eval`が未ビルドの場合は、上記のビルドコマンドをエラーと一緒に表示します。
@@ -32,13 +32,13 @@ python tools/ood_eval.py run --output results/ood_seed1
 正常終了後の比較表は`results/ood_seed1/report.md`です。計算中も完了した試行を順次保存します。計算を中断した場合は、同じ出力先を指定して再開します。
 
 ```bash
-python tools/ood_eval.py run --output results/ood_seed1 --resume
+python tools/ood_eval.py run --config configs/ood_eval.json --output results/ood_seed1 --resume
 ```
 
 最初に少数で接続確認する場合は、別の出力先で次を実行してください。この2例の結果を本番100例の結果と混ぜることはありません。
 
 ```bash
-python tools/ood_eval.py run --output results/ood_smoke \
+python tools/ood_eval.py run --config configs/ood_eval.json --output results/ood_smoke \
   --objects box ketchup --profiles id_control ood_articulation_180 \
   --samples 2 --batch-size 2
 ```
@@ -78,7 +78,7 @@ python tools/ood_record.py --results results/ood_seed1 \
 数値評価と動画収集を続けて実行することもできます。先にUnityを起動してください。
 
 ```bash
-python tools/ood_eval.py run --output results/ood_seed1 \
+python tools/ood_eval.py run --config configs/ood_eval.json --output results/ood_seed1 \
   --record-videos --unity-capture-dir raisimUnity/linux/Screenshot
 ```
 
@@ -179,21 +179,21 @@ results/ood_seed1/
 先に計画だけを確認することもできます。このコマンドはRaiSimを起動せず、NumPyと既存データだけで実行できます。
 
 ```bash
-python tools/ood_eval.py plan --output results/ood_seed2 --seed 2
-python tools/ood_eval.py run --output results/ood_seed2 --resume
+python tools/ood_eval.py plan --config configs/ood_eval.json --output results/ood_seed2 --seed 2
+python tools/ood_eval.py run --config configs/ood_eval.json --output results/ood_seed2 --resume
 ```
 
 既定のバッチは100環境です。メモリ使用量を減らす場合も、計100例という評価数は変わりません。
 
 ```bash
-python tools/ood_eval.py run --output results/ood_small_batch \
+python tools/ood_eval.py run --config configs/ood_eval.json --output results/ood_small_batch \
   --batch-size 10 --num-threads 4
 ```
 
 既定は再現性を優先したCPU推論です。既存環境のCUDAを使う場合は新しい実験で`--device cuda`を指定できます。数値実験には実時間待機を入れず、動画再生だけ実時間で進めます。
 
 ```bash
-python tools/ood_eval.py run --output results/ood_seed1_cuda --device cuda
+python tools/ood_eval.py run --config configs/ood_eval.json --output results/ood_seed1_cuda --device cuda
 ```
 
 GPUを使うのは左右の方策ネットワークの推論で、RaiSimの物理計算はCPUです。起動時に要求したデバイスを表示し、モデル読み込み後に実際のパラメータ配置とGPU名を確認して表示します。

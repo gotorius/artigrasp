@@ -2,7 +2,7 @@
 """Plan, run, resume, replay and summarize ArtiGrasp OOD experiments.
 
 Run from any directory; no C++ changes or additional Python packages are needed
-beyond the existing paper environment. See docs/OOD_EVALUATION_UBUNTU.md.
+beyond the existing paper environment. See docs/OOD_MULTIAXIS_DESIGN.md.
 """
 
 import argparse
@@ -22,7 +22,7 @@ from ood_suite.targets import build_plan, load_config
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = REPO_ROOT / "configs/ood_eval.json"
+DEFAULT_CONFIG = REPO_ROOT / "configs/ood_multiaxis.json"
 
 
 def _positive(value):
@@ -37,7 +37,7 @@ def _plan_options(parser):
     parser.add_argument("--output", type=Path, required=True, help="New experiment directory")
     parser.add_argument("--objects", nargs="+", help="Default: all ten released objects")
     parser.add_argument("--profiles", nargs="+", help="Target profiles; default uses the config's default_suite or all profiles")
-    parser.add_argument("--suite", help="Named profile set from config (e.g. core, full, stress)")
+    parser.add_argument("--suite", help="Named profile set from config (default config: all/core = eight combinations)")
     parser.add_argument("--samples", type=_positive, help="Samples per object AND condition; default 100")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--split", choices=("test", "train"))
