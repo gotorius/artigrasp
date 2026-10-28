@@ -68,6 +68,10 @@ We provide some pre-trained models to view the output of our method. They are st
 
 ## Evaluation
 
+- For goal-distribution OOD experiments on all objects (100 samples per object
+  and condition), separate paper/public metrics, Markdown comparison tables and
+  selected success/failure MP4s, see [Ubuntu OOD evaluation](docs/OOD_EVALUATION_UBUNTU.md).
+
 - For grasping and articulation of free-base objects, run
 
   ```Shell
