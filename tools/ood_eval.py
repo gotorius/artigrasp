@@ -36,7 +36,8 @@ def _plan_options(parser):
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path, required=True, help="New experiment directory")
     parser.add_argument("--objects", nargs="+", help="Default: all ten released objects")
-    parser.add_argument("--profiles", nargs="+", help="Default: all five configured conditions")
+    parser.add_argument("--profiles", nargs="+", help="Target profiles; default uses the config's default_suite or all profiles")
+    parser.add_argument("--suite", help="Named profile set from config (e.g. core, full, stress)")
     parser.add_argument("--samples", type=_positive, help="Samples per object AND condition; default 100")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--split", choices=("test", "train"))
@@ -160,7 +161,8 @@ def create_plan(args):
         raise ValueError("Output is not empty: {}. Use run --resume or a new directory.".format(output))
     config = load_config(args.config)
     plan = build_plan(REPO_ROOT, config, objects=args.objects, profiles=args.profiles,
-                      samples=args.samples, seed=args.seed, split=args.split)
+                      samples=args.samples, seed=args.seed, split=args.split,
+                      suite=getattr(args, "suite", None))
     for option, name in (("batch_size", "batch_size"), ("num_threads", "num_threads"), ("device", "device")):
         if getattr(args, option, None) is not None:
             plan["config"].setdefault("runtime", {})[name] = getattr(args, option)
@@ -172,6 +174,9 @@ def create_plan(args):
     provenance["plan_sha256"] = file_sha256(output / "plan.json")
     write_json(output / "provenance.json", provenance)
     print("Plan: {} episodes -> {}".format(len(plan["episodes"]), output / "plan.json"), flush=True)
+    print("{} objects x {} conditions x {} samples | suite: {}".format(
+        len(plan["objects"]), len(plan["profiles"]), plan["samples_per_object"],
+        plan["config"].get("selected_suite") or "explicit/legacy"), flush=True)
     return plan
 
 
@@ -203,6 +208,8 @@ def _load_or_create(args):
         raise ValueError("--objects differs from the saved plan")
     if args.profiles is not None and args.profiles != list(plan["config"]["profiles"]):
         raise ValueError("--profiles differs from the saved plan")
+    if getattr(args, "suite", None) is not None and args.suite != plan["config"].get("selected_suite"):
+        raise ValueError("--suite differs from the saved plan")
     verify_provenance(output)
     return plan
 
@@ -270,7 +277,8 @@ def run_experiment(args):
         raise RuntimeError("Evaluation interrupted/failed; completed trials are saved. Resume with --resume.") from failure
     if args.record_videos:
         command = [sys.executable, str(REPO_ROOT / "tools/ood_record.py"), "--results", str(output),
-                   "--per-outcome", str(plan["config"].get("videos_per_outcome", 5))]
+                   "--per-outcome", str(plan["config"].get("videos_per_outcome", 5)),
+                   "--metric", plan["config"].get("video_metric", "paper_success")]
         for directory in args.unity_capture_dir:
             command.extend(["--unity-capture-dir", str(directory.resolve())])
         try:

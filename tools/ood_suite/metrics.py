@@ -181,3 +181,81 @@ def evaluate_episode(states, spec, timing):
         }
     except (TypeError, ValueError, KeyError, IndexError, OverflowError) as error:
         return _invalid(error)
+
+
+def evaluate_goal_diagnostics(states, spec, timing, valid=True):
+    """Measure the requested intermediate pose and a stricter hinge tolerance.
+
+    These are additional experimental metrics. The paper and public metrics in
+    evaluate_episode remain unchanged. Lift position and orientation must be
+    reached simultaneously, so independently visiting each cannot pass.
+    """
+    errors = ("lift_position_error_min_m", "lift_orientation_error_min_rad",
+              "lift_position_error_final_m", "lift_orientation_error_final_rad",
+              "initial_articulation_error_rad", "articulation_motion_rad",
+              "articulation_start_angle_rad", "articulation_start_error_rad", "articulation_phase_motion_rad",
+              "requested_final_rotation_rad", "requested_lift_rotation_rad")
+    result = {name: None for name in errors}
+    result.update(diagnostic_valid=False, lift_pose_success=False,
+                  articulation_strict_success=False, strict_goal_success=False,
+                  articulation_initial_within_paper_tolerance=None,
+                  articulation_initial_within_strict_tolerance=None,
+                  articulation_start_within_paper_tolerance=None,
+                  articulation_start_within_strict_tolerance=None, ood_goal_success=False)
+    if not valid:
+        return result
+    try:
+        g, t = int(timing["grasp_steps"]), int(timing["transit_steps"])
+        final = states[-1]
+        position = spec.get("target_position_m", final[TARGET_POSITION])
+        quaternion = spec.get("target_quaternion_wxyz", final[TARGET_QUATERNION])
+        angle = float(spec.get("target_articulation_rad", final[TARGET_ANGLE]))
+        initial_angle = float(spec.get("initial_articulation_rad", states[0][OBJECT_ANGLE]))
+        lift = spec.get("lift_target_position_m")
+        lift_q = spec.get("lift_target_quaternion_wxyz", quaternion)
+        height = float(spec["target"]["lift_m"])
+        if lift is None:
+            lift = [float(position[0]), float(position[1]), float(states[0][124]) + height]
+        pe = math.sqrt(sum((float(value) - float(goal)) ** 2
+                           for value, goal in zip(final[OBJECT_POSITION], position)))
+        ae = quaternion_geodesic_rad(final[OBJECT_QUATERNION], quaternion)
+        aae = abs(float(final[OBJECT_ANGLE]) - angle)
+        lift_position, lift_orientation = [], []
+        height_reached = False
+        for state in states[g + 1:g + t + 1]:
+            lift_position.append(math.sqrt(sum((float(value) - float(goal)) ** 2
+                                                for value, goal in zip(state[OBJECT_POSITION], lift))))
+            lift_orientation.append(quaternion_geodesic_rad(state[OBJECT_QUATERNION], lift_q))
+            height_reached |= abs(float(state[124]) - float(states[0][124]) - height) < 0.05
+        lift_success = any(p < 0.05 and a < 0.2 for p, a in zip(lift_position, lift_orientation))
+        intermediate = bool(height_reached and (lift_success if spec.get("require_lift_pose_success") else True))
+        initial_error = abs(initial_angle - angle)
+        protocol = timing.get("protocol", "ketchup" if spec.get("object") == "ketchup" else "standard")
+        start_step = g + (2 if protocol == "ketchup" else 3) * t + 100
+        start_angle = float(states[start_step][OBJECT_ANGLE])
+        start_error = abs(start_angle - angle)
+        result.update({
+            "diagnostic_valid": True,
+            "lift_pose_success": bool(lift_success),
+            "lift_position_error_min_m": min(lift_position),
+            "lift_orientation_error_min_rad": min(lift_orientation),
+            "lift_position_error_final_m": lift_position[-1],
+            "lift_orientation_error_final_rad": lift_orientation[-1],
+            "initial_articulation_error_rad": initial_error,
+            "articulation_initial_within_paper_tolerance": initial_error < 0.5,
+            "articulation_initial_within_strict_tolerance": initial_error < 0.1,
+            "articulation_motion_rad": abs(float(final[OBJECT_ANGLE]) - initial_angle),
+            "articulation_start_angle_rad": start_angle,
+            "articulation_start_error_rad": start_error,
+            "articulation_start_within_paper_tolerance": start_error < 0.5,
+            "articulation_start_within_strict_tolerance": start_error < 0.1,
+            "articulation_phase_motion_rad": abs(float(final[OBJECT_ANGLE]) - start_angle),
+            "articulation_strict_success": aae < 0.1,
+            "requested_final_rotation_rad": quaternion_geodesic_rad(states[0][OBJECT_QUATERNION], quaternion),
+            "requested_lift_rotation_rad": quaternion_geodesic_rad(states[0][OBJECT_QUATERNION], lift_q),
+            "ood_goal_success": bool(pe < 0.05 and ae < 0.2 and aae < 0.5 and intermediate),
+            "strict_goal_success": bool(pe < 0.05 and ae < 0.2 and aae < 0.1 and intermediate),
+        })
+    except (TypeError, ValueError, KeyError, IndexError, OverflowError) as error:
+        result["diagnostic_error"] = str(error)
+    return result

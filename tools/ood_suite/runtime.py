@@ -190,6 +190,15 @@ class Controller:
         self.goal[:, 3:7] = rotations.euler2quat(euler)
         self.lift_goal = self.goal.copy()
         self.lift_goal[:, 2] += [spec["target"]["lift_m"] for spec in specs]
+        from .geometry import orientation_goal_pair
+        from .metrics import public_euler_y_rad
+        for i, spec in enumerate(specs):
+            rotation = spec["target"].get("orientation_rotation")
+            if rotation is not None:
+                placement_q, lift_q = orientation_goal_pair(self.goal[i, 3:7], rotation)
+                self.goal[i, 3:7], self.lift_goal[i, 3:7] = placement_q, lift_q
+                if rotation["stage"] in ("placement", "both"):
+                    self.euler_y[i] = public_euler_y_rad(placement_q)
 
     def reset(self):
         zero_velocity = np.zeros((self.count, 51), dtype=np.float32)
@@ -283,7 +292,9 @@ class Controller:
                     target_quaternion_wxyz=self.goal[index, 3:7].tolist(),
                     target_articulation_rad=float(self.angle[index, 0]),
                     target_euler_y_rad=float(self.euler_y[index]),
-                    initial_articulation_rad=float(self.grasp[2][index, 7]))
+                    initial_articulation_rad=float(self.grasp[2][index, 7]),
+                    lift_target_position_m=self.lift_goal[index, :3].tolist(),
+                    lift_target_quaternion_wxyz=self.lift_goal[index, 3:7].tolist())
 
 
 def simulate(env, controller, policy=None, replay_actions=None, realtime=False):
@@ -360,8 +371,8 @@ def _save_trajectory(path, index, states, right, left, data):
 
 
 def run_worker(repo_root, results_dir, episode_ids, device=None, threads=None):
-    from .metrics import evaluate_episode
-    from .targets import articulation_is_feasible
+    from .metrics import evaluate_episode, evaluate_goal_diagnostics
+    from .targets import articulation_is_feasible, articulation_outside_randomized_training
     _paths(repo_root)
     results_dir = Path(results_dir)
     plan = read_json(results_dir / "plan.json")
@@ -388,10 +399,13 @@ def run_worker(repo_root, results_dir, episode_ids, device=None, threads=None):
             row.update(evaluate_episode(states[:, i], metric_spec, timing))
             row.update({key: metric_spec[key] for key in (
                 "target_position_m", "target_quaternion_wxyz", "target_articulation_rad",
-                "target_euler_y_rad", "initial_articulation_rad")})
+                "target_euler_y_rad", "initial_articulation_rad", "lift_target_position_m",
+                "lift_target_quaternion_wxyz")})
             row["target_reachable"] = articulation_is_feasible(
                 row["target_articulation_rad"], spec["joint_limits_rad"])
             row["articulation_within_joint_limits"] = row["target_reachable"]
+            row["articulation_randomized_target_ood"] = articulation_outside_randomized_training(
+                row["target_articulation_rad"])
             row["articulation_requires_reset_resolution"] = False
             row["target"] = dict(spec["target"],
                                  articulation_rad=row["target_articulation_rad"],
@@ -404,7 +418,7 @@ def run_worker(repo_root, results_dir, episode_ids, device=None, threads=None):
                     if "_error_" in key:
                         row[key] = None
             row.update(lift_metrics(states[:, i], spec, timing, row["valid"]))
-            row["ood_goal_success"] = bool(row["paper_success"] and row["lift_target_success"])
+            row.update(evaluate_goal_diagnostics(states[:, i], metric_spec, timing, row["valid"]))
             row["timing"] = timing
             row["controller_changes"] = (["ketchup_forward_requested_articulation"]
                                          if spec["object"] == "ketchup" else [])
@@ -423,7 +437,7 @@ def run_worker(repo_root, results_dir, episode_ids, device=None, threads=None):
 
 
 def replay_episode(repo_root, results_dir, episode_id, video_name=None):
-    from .metrics import evaluate_episode
+    from .metrics import evaluate_episode, evaluate_goal_diagnostics
     _paths(repo_root)
     results_dir = Path(results_dir)
     plan = read_json(results_dir / "plan.json")
@@ -466,11 +480,13 @@ def replay_episode(repo_root, results_dir, episode_id, video_name=None):
         result = evaluate_episode(states[:, 0], row, row["timing"])
         result.update(lift_metrics(states[:, 0], row, row["timing"],
                                    bool(result["valid"] and not invalid[0])))
-        result["ood_goal_success"] = bool(result["paper_success"] and result["lift_target_success"])
+        result.update(evaluate_goal_diagnostics(states[:, 0], row, row["timing"],
+                                               bool(result["valid"] and not invalid[0])))
         equal = np.allclose(states[:, 0], recorded_states, atol=1e-4, rtol=1e-4,
                             equal_nan=False)
         classification_equal = all(bool(result[key]) == bool(row[key])
-                                   for key in ("paper_success", "public_success"))
+                                   for key in ("paper_success", "public_success", "ood_goal_success",
+                                               "strict_goal_success") if key in row)
         result.update(episode_id=episode_id,
                       verified=bool(equal and classification_equal and not invalid[0]),
                       trajectory_matches=bool(equal),

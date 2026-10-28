@@ -22,7 +22,8 @@ import time
 import uuid
 
 
-METRICS = ("paper_success", "public_success")
+BASE_METRICS = ("paper_success", "public_success")
+METRICS = BASE_METRICS + ("ood_goal_success", "strict_goal_success")
 
 
 def load_episodes(path):
@@ -42,7 +43,7 @@ def load_episodes(path):
             if not isinstance(row.get("valid"), bool):
                 raise ValueError("Episode {} has no Boolean valid flag".format(row["episode_id"]))
             if row["valid"]:
-                for key in METRICS:
+                for key in BASE_METRICS:
                     if not isinstance(row.get(key), bool):
                         raise ValueError("Episode {} has no Boolean {}".format(row["episode_id"], key))
             rows.append(row)
@@ -60,6 +61,10 @@ def select_episodes(rows, metric="paper_success", per_outcome=5, objects=None, p
     filtered = [row for row in rows
                 if (not objects or row["object"] in objects)
                 and (not profiles or row["profile"] in profiles)]
+    for row in filtered:
+        if row.get("valid") and not isinstance(row.get(metric), bool):
+            raise ValueError("Episode {} has no Boolean {}; select a recorded metric".format(
+                row["episode_id"], metric))
     groups = sorted(set((row["object"], row["profile"]) for row in filtered))
     selections = []
     for object_name, profile in groups:
@@ -171,7 +176,7 @@ def verify_replay(original, replay):
     if replay.get("verified") is not True:
         raise ValueError("Replay diverged from the quantitative trajectory")
     for metric in METRICS:
-        if replay.get(metric) is not original[metric]:
+        if metric in original and replay.get(metric) is not original[metric]:
             raise ValueError("Replay changed {} for {}".format(metric, original["episode_id"]))
 
 
@@ -254,6 +259,10 @@ def retain_unselected_groups(previous_manifest, selections, rows):
 def record_selected(args):
     repo_root = Path(__file__).resolve().parents[1]
     results_dir = Path(args.results).resolve()
+    if args.metric is None:
+        plan_path = results_dir / "plan.json"
+        config = json.loads(plan_path.read_text(encoding="utf-8")).get("config", {}) if plan_path.exists() else {}
+        args.metric = config.get("video_metric", "paper_success")
     ffprobe = shutil.which("ffprobe")
     if ffprobe is None:
         raise RuntimeError("ffprobe is missing from PATH; use the existing Ubuntu ffmpeg installation")
@@ -299,6 +308,9 @@ def record_selected(args):
                      "profile": row["profile"], "outcome": selection["outcome"],
                      "paper_success": row["paper_success"], "public_success": row["public_success"],
                      "relative_path": output_path.relative_to(video_root).as_posix(), "verified": False}
+            for key in ("ood_goal_success", "strict_goal_success"):
+                if key in row:
+                    entry[key] = row[key]
             entry["episode_sha256"] = hashlib.sha256(json.dumps(
                 row, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
             trajectory_path = results_dir / "trajectories" / (row["episode_id"] + ".npz")
@@ -364,7 +376,8 @@ def main(argv=None):
     parser.add_argument("--results", required=True, help="OOD run directory containing episodes.jsonl")
     parser.add_argument("--per-outcome", type=int, default=5,
                         help="Maximum success and failure examples per object/profile (default: 5)")
-    parser.add_argument("--metric", choices=METRICS, default="paper_success")
+    parser.add_argument("--metric", choices=METRICS, default=None,
+                        help="Success definition; default: plan video_metric, or paper_success for legacy runs")
     parser.add_argument("--objects", nargs="+", help="Optional object name filter")
     parser.add_argument("--profiles", nargs="+", help="Optional target profile filter")
     parser.add_argument("--unity-capture-dir", action="append", default=[],

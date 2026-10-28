@@ -14,6 +14,8 @@ import random
 from pathlib import Path
 from xml.etree import ElementTree
 
+from .geometry import axis_angle_quaternion
+
 
 ALL_OBJECTS = (
     "box", "laptop", "notebook", "waffleiron", "mixer", "ketchup",
@@ -94,13 +96,85 @@ def _sample(rng, value, name):
     return rng.uniform(low, high)
 
 
-def sample_target(object_name, sample_seed, profile):
+def select_profiles(config, profiles=None, suite=None):
+    """Select a declared suite or explicit profiles without resampling targets."""
+    configured = config.get("profiles", {})
+    if profiles is not None and suite is not None:
+        raise ValueError("Select either --profiles or --suite")
+    if profiles is not None:
+        return list(profiles)
+    selected_suite = suite or config.get("default_suite")
+    if selected_suite is None:
+        return list(configured)
+    suites = config.get("suites", {})
+    if not suites:
+        raise ValueError("This configuration has no named suites; use --profiles or configs/ood_multiaxis.json")
+    if selected_suite not in suites:
+        raise ValueError("Unknown suite {}; choose {}".format(selected_suite, ", ".join(suites)))
+    return list(suites[selected_suite])
+
+
+def articulation_outside_randomized_training(angle):
+    return bool(float(angle) < 0.5 - 1e-6 or float(angle) > 1.5 + 1e-6)
+
+
+def _rotation(sample_seed, definition, sample_index):
+    if not isinstance(definition, dict):
+        raise ValueError("orientation must define axis, angle_deg, frame and stage")
+    if set(definition) - {"axis", "angle_deg", "frame", "stage", "signed"}:
+        raise ValueError("Unknown orientation option(s)")
+    axis_name = definition.get("axis", "z")
+    frame = definition.get("frame", "world")
+    stage = definition.get("stage", "placement")
+    if not isinstance(definition.get("signed", True), bool):
+        raise ValueError("orientation.signed must be Boolean")
+    if frame not in ("world", "object") or stage not in ("placement", "lift", "both"):
+        raise ValueError("Invalid orientation frame or stage")
+    if axis_name not in ("x", "y", "z", "random"):
+        raise ValueError("orientation.axis must be x, y, z or random")
+    bounds = _range(definition.get("angle_deg", [60, 90]), "orientation.angle_deg")
+    if bounds[0] < 0 or bounds[1] > 180:
+        raise ValueError("orientation.angle_deg must lie in [0,180]")
+    rng = random.Random(stable_seed(sample_seed, "rotation_magnitude"))
+    angle = math.radians(rng.uniform(*bounds))
+    if definition.get("signed", True):
+        sign = (1 if sample_index % 2 == 0 else -1) if sample_index is not None else (
+            1 if random.Random(stable_seed(sample_seed, "rotation_sign")).random() < 0.5 else -1)
+        angle *= sign
+    if axis_name == "random":
+        # Uniform on the sphere; uniformly sampled Euler angles are not used.
+        rng = random.Random(stable_seed(sample_seed, "rotation_axis"))
+        z = rng.uniform(-1.0, 1.0)
+        phi = rng.uniform(-math.pi, math.pi)
+        radius = math.sqrt(max(0.0, 1.0 - z * z))
+        axis = [radius * math.cos(phi), radius * math.sin(phi), z]
+    else:
+        axis = {"x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0]}[axis_name]
+    return {"axis": axis, "axis_name": axis_name, "angle_rad": angle,
+            "frame": frame, "stage": stage, "quaternion_wxyz": axis_angle_quaternion(axis, angle)}
+
+
+def sample_target(object_name, sample_seed, profile, joint_bounds=None, sample_index=None):
     """Sample a paired baseline, then alter only the requested target axes.
 
     The profile-independent random stream ensures, for example, that a height
     sweep keeps translation, orientation, and articulation identical to control.
     A separate stream samples the additional OOD values.
     """
+    allowed = {"lift_m", "translation_distance_m", "translation_direction",
+               "translation_directions_deg", "orientation_delta_deg", "orientation",
+               "articulation_deg", "articulation_limit_fraction", "family", "severity",
+               "compare_to", "description", "stress_test", "factors"}
+    unknown = set(profile) - allowed
+    if unknown:
+        raise ValueError("Unknown target option(s): {}".format(", ".join(sorted(unknown))))
+    if "orientation" in profile and "orientation_delta_deg" in profile:
+        raise ValueError("Choose quaternion orientation or legacy orientation_delta_deg")
+    if "articulation_deg" in profile and "articulation_limit_fraction" in profile:
+        raise ValueError("Choose absolute articulation_deg or articulation_limit_fraction")
+    direction_rule = profile.get("translation_direction", "random")
+    if direction_rule not in ("random", "control"):
+        raise ValueError("translation_direction must be random or control")
     rng = random.Random(stable_seed(sample_seed, "public_target"))
     ketchup = object_name == "ketchup"
     translation = [rng.uniform(-0.1, -0.05), rng.uniform(-0.1, -0.05)]
@@ -128,19 +202,50 @@ def sample_target(object_name, sample_seed, profile):
             raise ValueError("translation_distance_m must be positive")
         # Balanced directions test extrapolation independent of a preferred axis.
         # All directions have exactly the sampled norm; no axis can cancel it.
-        direction = rng_axis.uniform(-math.pi, math.pi)
+        direction = (math.atan2(translation[1], translation[0]) if direction_rule == "control"
+                     else rng_axis.uniform(-math.pi, math.pi))
         target["translation_m"] = [distance * math.cos(direction), distance * math.sin(direction)]
         changed_axes.append("translation")
+    if "translation_directions_deg" in profile:
+        directions = profile["translation_directions_deg"]
+        if not isinstance(directions, list) or not directions or not all(
+                isinstance(value, (int, float)) and math.isfinite(value) for value in directions):
+            raise ValueError("translation_directions_deg must be a nonempty list of finite angles")
+        direction_index = (sample_index % len(directions) if sample_index is not None else
+                           random.Random(stable_seed(sample_seed, "direction_bin")).randrange(len(directions)))
+        direction_deg = float(directions[direction_index])
+        radius = math.hypot(*target["translation_m"])
+        direction = math.radians(direction_deg)
+        target["translation_m"] = [radius * math.cos(direction), radius * math.sin(direction)]
+        target.setdefault("strata", {})["translation_direction_deg"] = direction_deg
+        changed_axes.append("translation_direction")
     if "orientation_delta_deg" in profile:
         rng_axis = random.Random(stable_seed(sample_seed, "ood_orientation"))
         target["orientation_delta_rad"] = math.radians(_sample(
             rng_axis, profile["orientation_delta_deg"], "orientation_delta_deg"))
         changed_axes.append("orientation")
+    if "orientation" in profile:
+        rotation = _rotation(sample_seed, profile["orientation"], sample_index)
+        target["orientation_rotation"] = rotation
+        target.setdefault("strata", {})["rotation_sign"] = "positive" if rotation["angle_rad"] >= 0 else "negative"
+        changed_axes.append("orientation_" + rotation["stage"])
     if "articulation_deg" in profile:
         rng_axis = random.Random(stable_seed(sample_seed, "ood_articulation"))
         target["articulation_rad"] = math.radians(_sample(
             rng_axis, profile["articulation_deg"], "articulation_deg"))
         target["articulation_rule"] = "absolute"
+        changed_axes.append("articulation")
+    if "articulation_limit_fraction" in profile:
+        if joint_bounds is None:
+            raise ValueError("articulation_limit_fraction requires URDF joint bounds")
+        bounds = _range(profile["articulation_limit_fraction"], "articulation_limit_fraction")
+        if bounds[0] < 0 or bounds[1] > 1:
+            raise ValueError("articulation_limit_fraction must lie in [0,1]")
+        rng_axis = random.Random(stable_seed(sample_seed, "joint_limit_fraction"))
+        fraction = rng_axis.uniform(*bounds)
+        target["articulation_rad"] = joint_bounds[0] + fraction * (joint_bounds[1] - joint_bounds[0])
+        target["articulation_rule"] = "absolute"
+        target["articulation_limit_fraction"] = fraction
         changed_axes.append("articulation")
     target["changed_axes"] = changed_axes
     return target
@@ -188,7 +293,7 @@ def load_label_sets(repo_root, objects, split="test"):
 
 
 def build_plan(repo_root, config, objects=None, profiles=None, samples=None,
-               seed=None, split=None, label_sets=None):
+               seed=None, split=None, label_sets=None, suite=None):
     """Build a deterministic list of paired episodes; simulation is separate.
 
     ``label_sets`` is optional so tests can use in-memory labels. Repeated label
@@ -200,7 +305,7 @@ def build_plan(repo_root, config, objects=None, profiles=None, samples=None,
     """
     selected_objects = list(config.get("objects", ALL_OBJECTS) if objects is None else objects)
     configured_profiles = config.get("profiles", {})
-    selected_profiles = list(configured_profiles if profiles is None else profiles)
+    selected_profiles = select_profiles(config, profiles, suite)
     samples = config.get("samples_per_object", 100) if samples is None else samples
     seed = config.get("seed", 1) if seed is None else seed
     split = config.get("split", "test") if split is None else split
@@ -254,9 +359,10 @@ def build_plan(repo_root, config, objects=None, profiles=None, samples=None,
                 grasp_index = label_rng.randrange(len(grasp_labels))
                 arti_index = label_rng.randrange(len(arti_labels))
             for profile_name in selected_profiles:
-                target = sample_target(object_name, sample_seed, configured_profiles[profile_name])
+                definition = configured_profiles[profile_name]
+                target = sample_target(object_name, sample_seed, definition, limits, sample_index)
                 feasible = articulation_is_feasible(target["articulation_rad"], limits)
-                episodes.append({
+                episode = {
                     "episode_id": "{}__{}__{:04d}".format(object_name, profile_name, sample_index),
                     "object": object_name,
                     "profile": profile_name,
@@ -274,7 +380,17 @@ def build_plan(repo_root, config, objects=None, profiles=None, samples=None,
                     "articulation_within_joint_limits": feasible,
                     "target_reachability_basis": "articulation limits only; spatial reachability not inferred",
                     "articulation_requires_reset_resolution": target["articulation_rule"] == "public_relative",
-                })
+                }
+                if config.get("evaluation_protocol") == "multiaxis_v1":
+                    episode.update({"evaluation_protocol": "multiaxis_v1", "require_lift_pose_success": True,
+                                    "family": definition.get("family", "unspecified"),
+                                    "severity": definition.get("severity"),
+                                    "compare_to": definition.get("compare_to", "id_control"),
+                                    "stress_test": bool(definition.get("stress_test", False)),
+                                    "articulation_randomized_target_ood": (
+                                        articulation_outside_randomized_training(target["articulation_rad"])
+                                        if target["articulation_rule"] == "absolute" else None)})
+                episodes.append(episode)
     effective_config = copy.deepcopy(config)
     effective_config.update({
         "objects": selected_objects[:],
@@ -283,6 +399,9 @@ def build_plan(repo_root, config, objects=None, profiles=None, samples=None,
         "seed": int(seed),
         "split": split,
     })
+    effective_config["selected_suite"] = suite or (config.get("default_suite") if profiles is None else None)
+    if "default_suite" in effective_config:
+        effective_config["default_suite"] = effective_config["selected_suite"]
     return {
         "schema_version": 1,
         "config": effective_config,
