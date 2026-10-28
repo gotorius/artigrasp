@@ -238,6 +238,9 @@ def run_experiment(args):
     batch_size = args.batch_size or settings.get("batch_size", 100)
     if batch_size <= 0:
         raise ValueError("runtime.batch_size must be positive")
+    print("Requested policy inference device: {} | RaiSim physics: CPU | threads: {} | batch size: {}".format(
+        args.device or settings.get("device", "cpu"),
+        args.num_threads or settings.get("num_threads", 4), batch_size), flush=True)
     remaining = [spec for spec in plan["episodes"] if spec["episode_id"] not in complete]
     groups = {}
     for spec in remaining:

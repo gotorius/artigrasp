@@ -190,6 +190,30 @@ python tools/ood_eval.py run --output results/ood_small_batch \
 
 既定は再現性を優先したCPU推論です。既存環境のCUDAを使う場合は新しい実験で`--device cuda`を指定できます。数値実験には実時間待機を入れず、動画再生だけ実時間で進めます。
 
+```bash
+python tools/ood_eval.py run --output results/ood_seed1_cuda --device cuda
+```
+
+GPUを使うのは左右の方策ネットワークの推論で、RaiSimの物理計算はCPUです。起動時に要求したデバイスを表示し、モデル読み込み後に実際のパラメータ配置とGPU名を確認して表示します。
+
+```text
+Requested policy inference device: cuda | RaiSim physics: CPU | threads: 4 | batch size: 100
+Loading checkpoints on CPU; requested policy inference device: cuda
+Policy inference device (verified parameters): cuda:0 (GPU名)
+RaiSim physics device: CPU | environments: 100 | threads: 4
+```
+
+`torch.load(..., map_location="cpu")`はチェックポイントを最初にCPUへ読み込む指定です。その後モデルを指定デバイスへ移すため、この行やPyTorchの`FutureWarning`から推論先を判定することはできません。CUDAを指定して利用できなかった場合は停止し、CPUに自動で切り替わることはありません。
+
+既に実行中の場合はコードを更新せず、別ターミナルで保存された設定を確認できます。実行フォルダの`execution.json`の`device`が推論先の要求設定です。完了した試行の`episodes.jsonl`には`policy_device`も保存します。
+
+```bash
+python -c "import json; print(json.load(open('results/ood_seed1_cuda/execution.json'))['device'])"
+nvidia-smi
+```
+
+`nvidia-smi`で評価中のPythonプロセスを確認できます。GPU使用率は、CPU側の物理計算やCPU/GPU間転送を待って低くなる場合があります。表示だけを更新する場合も評価コードのハッシュが変わるため、実行中の実験は完了させてから更新し、次の実験は新しい出力先で開始してください。
+
 保存した1例だけを録画なしで再生・照合する例です。
 
 ```bash

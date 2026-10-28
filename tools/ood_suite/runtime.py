@@ -98,6 +98,19 @@ def make_environment(repo_root, data, config, object_name):
     return env
 
 
+def policy_parameter_device(models, requested):
+    """Inspect actual parameter placement rather than echoing the CLI option."""
+    devices = {parameter.device for model in models.values() for parameter in model.parameters()}
+    if len(devices) != 1:
+        raise RuntimeError("Expected all policy parameters on one device; got {}".format(
+            sorted(str(device) for device in devices)))
+    actual = next(iter(devices))
+    if (actual.type != requested.type or
+            (requested.index is not None and actual.index != requested.index)):
+        raise RuntimeError("Policy device mismatch: requested {}, actual {}".format(requested, actual))
+    return actual
+
+
 class Policies:
     """Deterministic actors only; critic/optimizer/scaling are unused by released eval."""
 
@@ -109,6 +122,8 @@ class Policies:
         self.device = torch.device(device)
         if self.device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA requested but unavailable; select --device cpu.")
+        print("Loading checkpoints on CPU; requested policy inference device: {}".format(
+            self.device), flush=True)
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -129,6 +144,13 @@ class Policies:
             model.load_state_dict(checkpoint["actor_architecture_state_dict"])
             model.eval().to(self.device)
             self.models[name] = model
+        self.device = policy_parameter_device(self.models, self.device)
+        description = str(self.device)
+        if self.device.type == "cuda":
+            description += " ({})".format(torch.cuda.get_device_name(self.device))
+        print("Policy inference device (verified parameters): {}".format(description), flush=True)
+        print("RaiSim physics device: CPU | environments: {} | threads: {}".format(
+            env.num_envs, config["environment"]["num_threads"]), flush=True)
         self.articulation = False
 
     def actions(self, obs_r, obs_l):
